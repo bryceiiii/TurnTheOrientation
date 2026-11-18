@@ -19,10 +19,37 @@ namespace Unity.Pipeline.Models
         public bool Success { get; set; }
 
         /// <summary>
-        /// Name of the command that was executed.
+        /// The command that was executed, by its full name (<c>editor status</c>), as a user types
+        /// it. On the /api/exec wire it is sent in verbose mode, and always when
+        /// <see cref="EchoCommand"/> is set (replies to raw command-line requests).
         /// </summary>
         [JsonProperty("command")]
         public string Command { get; set; }
+
+        /// <summary>
+        /// Whether <see cref="Command"/> is serialized even in lean mode. Set on every reply to a raw
+        /// (<c>argv</c> / <c>commandLine</c>) request, which names the command by position and so
+        /// has no other way to tell the caller which command it resolved to. Never serialized itself;
+        /// structured requests leave it false and keep the lean envelope.
+        /// </summary>
+        [JsonIgnore]
+        internal bool EchoCommand { get; set; }
+
+        /// <summary>
+        /// The HTTP status a failed response is answered with when the command returns it: the
+        /// envelope then fails too, with this response as its result. Null keeps the default, where
+        /// a returned failure is the result of a successful envelope.
+        /// </summary>
+        [JsonIgnore]
+        internal int? FailureStatusCode { get; set; }
+
+        /// <summary>
+        /// Whether <see cref="Result"/> is serialized although <see cref="Success"/> is false: set on
+        /// an envelope answering a <see cref="FailureStatusCode"/> failure, whose result is the
+        /// command's payload.
+        /// </summary>
+        [JsonIgnore]
+        internal bool KeepsResultOnFailure { get; set; }
 
 
         /// <summary>
@@ -59,9 +86,9 @@ namespace Unity.Pipeline.Models
         public bool? Retryable { get; set; }
 
         /// <summary>
-        /// Stable, machine-readable failure discriminator (e.g. <c>INVALID_COMMAND_ARGS</c>).
+        /// Stable, machine-readable failure discriminator (e.g. <c>INVALID_COMMAND_ARGS</c>, <c>TIMEOUT</c>).
         ///
-        /// HTTP status cannot serve as the discriminator here: every /api/exec failure is 400, so
+        /// HTTP status cannot serve as the discriminator here: most /api/exec failures are 400, so
         /// status alone cannot separate "your arguments are wrong" from "the command threw".
         /// Spelled to match the <c>unity</c> CLI's own InvalidArgsCode literal, so neither side
         /// needs a translation table.
@@ -74,10 +101,11 @@ namespace Unity.Pipeline.Models
         /// than bailing, so a user fixing a command line sees all of its problems at once.
         /// Machine-readable rather than prose, because the <c>unity</c> CLI renders and localizes
         /// these itself; <see cref="BaseResponse.ErrorDetails"/> carries the English fallback for
-        /// clients that do not.
+        /// clients that do not. Internal, since only the server fills it: [JsonProperty] still
+        /// serializes it.
         /// </summary>
         [JsonProperty("argProblems", NullValueHandling = NullValueHandling.Ignore)]
-        public List<ArgProblem> ArgProblems { get; set; }
+        internal List<ArgProblem> ArgProblems { get; set; }
 
         /// <summary>
         /// The resolved command's catalog entry, shaped like a /api/commands <c>commands[]</c>
@@ -94,6 +122,15 @@ namespace Unity.Pipeline.Models
         /// </summary>
         [JsonProperty("parameters", NullValueHandling = NullValueHandling.Ignore)]
         public JObject BoundParameters { get; set; }
+
+        /// <summary>
+        /// The group this reply lists, when a raw request named a group and nothing after it
+        /// (<c>unity command animation</c>): <see cref="Result"/> is then that group's listing, not a
+        /// command's result. Absent on every other reply, so a client can render a listing without
+        /// guessing from the result's shape.
+        /// </summary>
+        [JsonProperty("listedGroup", NullValueHandling = NullValueHandling.Ignore)]
+        public string ListedGroup { get; set; }
 
         /// <summary>
         /// Create the argument-binding failure response (sent with HTTP 400): the command was
@@ -116,6 +153,24 @@ namespace Unity.Pipeline.Models
         }
 
         /// <summary>
+        /// Create the timeout response (sent with HTTP 504): the command did not finish, or did not
+        /// start, within its timeout.
+        /// </summary>
+        internal static CommandExecutionResponse CmdTimeout(string cmd, string details)
+        {
+            return new CommandExecutionResponse
+            {
+                Command = cmd,
+                Success = false,
+                ExecutedAt = DateTime.UtcNow,
+                Error = "Request Timed Out",
+                ErrorDetails = details,
+                ErrorCode = "TIMEOUT",
+                Retryable = false
+            };
+        }
+
+        /// <summary>
         /// The specific cause of a "busy" response, matching /api/status's own "status" values for
         /// the same conditions ("settling", "blocked_by_dialog") — a caller can branch on this
         /// directly instead of inferring the cause from whether "dialogs" happens to be populated.
@@ -123,15 +178,6 @@ namespace Unity.Pipeline.Models
         /// </summary>
         [JsonProperty("busyReason", NullValueHandling = NullValueHandling.Ignore)]
         public string BusyReason { get; set; }
-
-        /// <summary>
-        /// Dialogs (see EditorDialogEvents) that opened at or after this call started. Omitted
-        /// when none occurred, so existing envelopes are unchanged. Lets a caller learn "this
-        /// call took 40s because a dialog was shown" even without polling /api/dialog
-        /// concurrently.
-        /// </summary>
-        [JsonProperty("dialogsDuringExecution", NullValueHandling = NullValueHandling.Ignore)]
-        public List<object> DialogsDuringExecution { get; set; }
 
         /// <summary>
         /// Currently-open dialog(s) (see EditorDialogEvents), attached to a busy response when a

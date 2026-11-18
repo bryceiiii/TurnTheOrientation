@@ -1,11 +1,14 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+#if UNITY_6000_5_OR_NEWER
+using Unity.Scripting.LifecycleManagement;
+#endif
 
 #if UNITY_EDITOR || (UNITY_STANDALONE && DEBUG)
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
+using UnityPipeline.Microsoft.CodeAnalysis;
+using UnityPipeline.Microsoft.CodeAnalysis.CSharp;
+using UnityPipeline.Microsoft.CodeAnalysis.CSharp.Syntax;
 #endif
 
 namespace Unity.Pipeline.Telemetry
@@ -79,6 +82,9 @@ namespace Unity.Pipeline.Telemetry
     /// the wrapper's exact shape. Not worth it today: the extra parse already runs off the eval
     /// response path (see Threading above), so it costs background CPU, not eval latency.
     /// </summary>
+#if UNITY_6000_5_OR_NEWER
+    [NoAutoStaticsCleanup]
+#endif
     static class EvalUsageFingerprinter
     {
         /// <summary>

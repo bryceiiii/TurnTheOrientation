@@ -17,28 +17,29 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
     /// </summary>
     static class InputSettingsCommands
     {
-        const string Group = "input";
+        const string Domain = "input";
+        const string Group = "settings." + Domain;
         const string AssetPath = "ProjectSettings/InputManager.asset";
 
-        [CliCommand("get_input_settings", "Read the legacy Input Manager axes (names and count).", MainThreadRequired = true, Tags = new[] { "settings/input" })]
-        public static ProjectSettingsResponse Get() => ProjectSettingsCommand.Get(Group, Read);
+        [CliGroupCommand(Group, "Read the legacy Input Manager axes (names and count).", MainThreadRequired = true, Tags = new[] { "settings/input" }, Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode Get(CommandContext cmd) => ProjectSettingsCommand.Get(cmd, Domain, Read);
 
-        [CliCommand("set_input_settings", "Tune a legacy Input Manager axis (sensitivity/gravity/dead) by name. Requires confirm=true; use dry_run to preview. Not undoable via Ctrl+Z.", MainThreadRequired = true, Tags = new[] { "settings/input" })]
-        public static ProjectSettingsResponse Set(
+        [CliGroupCommand(Group, "Tune a legacy Input Manager axis (sensitivity/gravity/dead) by name. Requires confirm=true; use dry-run to preview. Not undoable via Ctrl+Z.", MainThreadRequired = true, Tags = new[] { "settings/input" }, Effect = CommandEffect.Destructive)]
+        internal static ExitCode Set(CommandContext cmd,
             [CliArg("settings", "Axis change. 'axis' selects the axis by name; omitted numeric fields are left unchanged.")] InputAxisInput settings = null,
             [CliArg("confirm", "Apply the change. Without it the call is refused.")] bool confirm = false,
-            [CliArg("dry_run", "Preview the change without applying it.")] bool dryRun = false)
+            [CliArg("dry-run", "Preview the change without applying it.")] bool dryRun = false)
         {
             if (settings == null)
-                return ProjectSettingsResponse.Fail(Group, "No 'settings' object provided.");
+                return ProjectSettingsCommand.Fail(cmd, ExitCode.InvalidUsage, "No 'settings' object provided.");
             if (string.IsNullOrEmpty(settings.Axis))
-                return ProjectSettingsResponse.Fail(Group, "'axis' is required.");
+                return ProjectSettingsCommand.Fail(cmd, ExitCode.InvalidUsage, "'axis' is required.");
 
             var so = ProjectSettingsAsset.Load(AssetPath);
             var axes = so.FindProperty("m_Axes");
             var index = FindAxisIndex(axes, settings.Axis);
             if (index < 0)
-                return ProjectSettingsResponse.Fail(Group, $"No axis named '{settings.Axis}'.");
+                return ProjectSettingsCommand.Fail(cmd, ExitCode.NotFound, $"No axis named '{settings.Axis}'.");
 
             var axis = axes.GetArrayElementAtIndex(index);
             var changes = new List<string>();
@@ -47,7 +48,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
             AddFloatChange(axis, "dead", settings.Dead, changes);
 
             if (changes.Count == 0)
-                return NoChanges();
+                return ProjectSettingsCommand.NoChanges(cmd, Domain, Read);
 
             var planText = $"Set input axis '{settings.Axis}': " + string.Join("; ", changes);
 
@@ -67,14 +68,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
                 AssetDatabase.SaveAssets();
             }
 
-            return ProjectSettingsCommand.Apply(Group, confirm, dryRun, settings, () => planText, Apply, Read);
-        }
-
-        static ProjectSettingsResponse NoChanges()
-        {
-            var response = ProjectSettingsCommand.Get(Group, Read);
-            response.Message = "No changes specified; nothing to apply.";
-            return response;
+            return ProjectSettingsCommand.Apply(cmd, Domain, confirm, dryRun, settings, () => planText, Apply, Read);
         }
 
         static int FindAxisIndex(SerializedProperty axes, string name)
@@ -126,7 +120,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
 
             return new Dictionary<string, object>
             {
-                ["axisCount"] = names.Count,
+                ["axis-count"] = names.Count,
                 ["axes"] = names
             };
         }

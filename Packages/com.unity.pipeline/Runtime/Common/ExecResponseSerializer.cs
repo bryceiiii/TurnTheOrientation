@@ -1,7 +1,13 @@
+using System.IO;
+using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 using Unity.Pipeline.Models;
+#if UNITY_6000_5_OR_NEWER
+using Unity.Scripting.LifecycleManagement;
+#endif
 
 namespace Unity.Pipeline
 {
@@ -16,7 +22,9 @@ namespace Unity.Pipeline
     ///
     /// * <c>verbose</c> — envelope metadata. Off (default): the always-on metadata (executedAt,
     ///   command, executionTimeMs) is stripped from every <see cref="BaseResponse"/>-derived object
-    ///   in the graph (the outer envelope AND responses nested as <c>result</c>, e.g. eval's), and
+    ///   in the graph (the outer envelope AND responses nested as <c>result</c>, e.g. eval's) —
+    ///   except that a reply to a raw <c>argv</c>/<c>commandLine</c> request keeps its <c>command</c>
+    ///   (see <see cref="CommandExecutionResponse.EchoCommand"/>) — and
     ///   the envelope's own null keys (message/error/errorDetails when null, result on failure — all
     ///   redundant given <c>success</c>) are omitted, so a minimal success is just
     ///   <c>{"success":true,"result":...}</c>. On: full fidelity for debugging/correlation.
@@ -28,15 +36,22 @@ namespace Unity.Pipeline
     ///
     /// One invariant holds in EVERY mode: a successful reply always carries <c>result</c>, even
     /// when its value is null — a null result on success is the command's actual value (e.g. a
-    /// format="value" read of a genuinely-null field), never a droppable envelope null.
+    /// detail="value" read of a genuinely-null field), never a droppable envelope null.
     ///
     /// The two axes are deliberately separate booleans: envelope metadata and payload null fidelity
     /// are orthogonal concerns, and each combination is meaningful.
+    ///
+    /// A reply embeds the command's output as it is: the HTTP transport asks for it as
+    /// <see cref="SerializeResult(object, bool, bool)"/> gives it for the reply's flags, the same JSON
+    /// this serializer gives the result inside the envelope, so the result is serialized once.
     ///
     /// The gating lives in a contract resolver scoped to THIS serializer, not in ShouldSerialize*
     /// hooks on the models: serializing these types anywhere else (other endpoints, logs, tests) is
     /// unaffected, and Serialize never mutates the response object.
     /// </summary>
+#if UNITY_6000_5_OR_NEWER
+    [NoAutoStaticsCleanup]
+#endif
     internal static class ExecResponseSerializer
     {
         /// <summary>
@@ -60,9 +75,16 @@ namespace Unity.Pipeline
                     switch (member.Name)
                     {
                         case nameof(BaseResponse.ExecutedAt):
-                        case nameof(CommandExecutionResponse.Command):
                         case nameof(CommandExecutionResponse.ExecutionTimeMs):
                             property.ShouldSerialize = _ => false;
+                            break;
+
+                        // Lean mode drops the command echo, except on a reply to a raw
+                        // command-line request: there the caller named the command by position
+                        // and the echo is how it learns what it resolved to (EchoCommand).
+                        case nameof(CommandExecutionResponse.Command):
+                            property.ShouldSerialize = instance =>
+                                instance is CommandExecutionResponse response && response.EchoCommand;
                             break;
 
                         // The ONLY keys lean mode may null-drop: genuinely redundant given
@@ -83,13 +105,14 @@ namespace Unity.Pipeline
                         case nameof(CommandExecutionResponse.Result):
                             // A null result on SUCCESS is not a redundant envelope null — it is
                             // the command's actual value (e.g. get_serialized_fields
-                            // format="value" reading a genuinely-null field), so a successful
+                            // detail="value" reading a genuinely-null field), so a successful
                             // reply always carries "result", explicitly null when null (Include
                             // also defeats the omitNulls serializer settings). On failure the
                             // result is structurally meaningless and stays omitted.
                             property.NullValueHandling = NullValueHandling.Include;
                             property.ShouldSerialize = instance =>
-                                !(instance is CommandExecutionResponse response) || response.Success;
+                                !(instance is CommandExecutionResponse response) || response.Success
+                                || response.KeepsResultOnFailure;
                             break;
                     }
                 }
@@ -132,10 +155,82 @@ namespace Unity.Pipeline
         /// </summary>
         public static string Serialize(BaseResponse body, bool verbose, bool omitNulls = false)
         {
-            var settings = verbose
+            return JsonConvert.SerializeObject(body, SettingsFor(verbose, omitNulls));
+        }
+
+        static JsonSerializerSettings SettingsFor(bool verbose, bool omitNulls)
+        {
+            return verbose
                 ? (omitNulls ? m_VerboseOmitNullsSettings : m_VerboseSettings)
                 : (omitNulls ? m_LeanOmitNullsSettings : m_LeanSettings);
-            return JsonConvert.SerializeObject(body, settings);
+        }
+
+        /// <summary>
+        /// Serialize what a command returned, as the command's output: the JSON a default
+        /// (lean, nulls kept) reply carries as its <c>result</c>.
+        /// </summary>
+        public static string SerializeResult(object result)
+        {
+            return SerializeResult(result, verbose: false, omitNulls: false);
+        }
+
+        /// <summary>
+        /// Serialize what a command returned, as the command's output for a reply with these flags:
+        /// the JSON that reply carries as its <c>result</c>, so the HTTP transport embeds it byte
+        /// for byte. The settings are the envelope's, which apply to the whole graph.
+        /// </summary>
+        public static string SerializeResult(object result, bool verbose, bool omitNulls)
+        {
+            return JsonConvert.SerializeObject(result, SettingsFor(verbose, omitNulls));
+        }
+
+        /// <summary>
+        /// <see cref="SerializeResult(object, bool, bool)"/>'s JSON as a token, dates kept as strings.
+        /// </summary>
+        public static JToken ResultToToken(object result, bool verbose, bool omitNulls)
+        {
+            using (var reader = new JsonTextReader(new StringReader(SerializeResult(result, verbose, omitNulls))) { DateParseHandling = DateParseHandling.None })
+                return JToken.ReadFrom(reader);
+        }
+
+        /// <summary>
+        /// The <c>result</c> of a reply, from a command's output: embedded as it is, or with its
+        /// null keys dropped when <paramref name="omitNulls"/> asks for it after the output was
+        /// written, as a job's poll does.
+        /// </summary>
+        public static JToken ResultFromOutput(string output, bool omitNulls)
+        {
+            if (!omitNulls)
+                return new JRaw(output);
+
+            // Read as written: a date-like string stays the string the command returned.
+            using (var reader = new JsonTextReader(new StringReader(output)) { DateParseHandling = DateParseHandling.None })
+            {
+                var token = JToken.ReadFrom(reader);
+                RemoveNullProperties(token);
+                return token;
+            }
+        }
+
+        /// <summary>Drops the null keys of <paramref name="token"/>'s objects, at any depth.</summary>
+        public static void RemoveNullProperties(JToken token)
+        {
+            switch (token)
+            {
+                case JObject obj:
+                    foreach (var property in obj.Properties().ToList())
+                    {
+                        if (property.Value.Type == JTokenType.Null)
+                            property.Remove();
+                        else
+                            RemoveNullProperties(property.Value);
+                    }
+                    break;
+                case JArray array:
+                    foreach (var item in array)
+                        RemoveNullProperties(item);
+                    break;
+            }
         }
     }
 }

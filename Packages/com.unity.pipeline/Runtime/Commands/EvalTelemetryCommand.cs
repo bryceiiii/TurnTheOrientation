@@ -18,12 +18,22 @@ namespace Unity.Pipeline.Runtime.Commands
     /// </summary>
     static class EvalTelemetryCommand
     {
-        [CliCommand("report_evals",
+        const string Group = "diagnostics";
+
+        [CliGroupCommand(Group,
             "Aggregate local eval-usage telemetry into a ranked report: API fingerprint frequency, one-liner percentage, error rate, and command-coverage suggestions.",
             MainThreadRequired = false,
-            Tags = new[] { "observability/eval_usage" })]
-        public static EvalUsageReport ReportEvals(
+            Tags = new[] { "observability/eval_usage" },
+            Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode ReportEvals(CommandContext cmd,
             [CliArg("top", "Maximum entries in each ranked list (API fingerprints, and uncovered patterns suggested as commands). Accepted range: 0 or greater; negative values fall back to the default (50).")] int top = 50)
+        {
+            cmd.Result.Write(BuildReport(top));
+            return ExitCode.Success;
+        }
+
+        /// <summary>The ranked report over the retained eval-usage log, each ranked list capped by <paramref name="top"/>.</summary>
+        internal static EvalUsageReport BuildReport(int top)
         {
             // Clamp, don't reject: a negative cap has no meaning, so fall back to the default rather
             // than fail the command or return an unbounded report.
@@ -34,8 +44,7 @@ namespace Unity.Pipeline.Runtime.Commands
 
             // Cross-reference against the live catalog. Discovery is already warm (the server queried
             // it to route this very request), so this reads the cache and touches no main-thread API.
-            var availableCommands = new HashSet<string>(
-                CommandRegistry.DiscoverCommands().Select(c => c.Name));
+            var availableCommands = new HashSet<string>(CommandRegistry.DiscoverCommands().Select(c => c.FullName));
 
             return EvalUsageAggregator.Build(records, availableCommands, topUncoveredLimit: top, fingerprintLimit: top);
         }

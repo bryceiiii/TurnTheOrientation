@@ -42,6 +42,6 @@ adjusted directly in the Unity editor. Gameplay audio is synthesized at runtime.
 
 ## Open In Unity
 
-Open `Assets/Scenes/SampleScene.unity` in Unity `6000.3.10f1` and press Play.
+Open `Assets/Scenes/SampleScene.unity` in Unity `6000.3.27f2` and press Play.
 `LevelManager` on `Turn The Orientation` loads `Level_01` and keeps the camera,
 HUD, audio, and game state alive across level scene changes.

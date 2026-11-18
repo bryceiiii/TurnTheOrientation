@@ -131,7 +131,7 @@ namespace Unity.Pipeline.Editor.Commands.Batch
             // A failed or skipped operation has no result to reference — substituting null silently
             // would feed a bogus value into this op's parameters. Error explicitly instead. In the
             // real Execute() loop only Success=false outcomes are observable here (under
-            // on_error=continue — earlier failures don't stop the batch); Skipped entries are
+            // on-error=continue — earlier failures don't stop the batch); Skipped entries are
             // appended AFTER the loop, so the "was skipped" wording is defensive, reachable only
             // when the resolver is driven directly (unit tests / future callers).
             var outcome = outcomes != null && targetIndex < outcomes.Count ? outcomes[targetIndex] : null;

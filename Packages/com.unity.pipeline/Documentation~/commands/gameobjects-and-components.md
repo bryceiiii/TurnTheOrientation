@@ -2,7 +2,9 @@
 
 Commands for creating GameObjects, querying the scene hierarchy, mutating the core GameObject/Transform surface, and adding/removing components and editing their serialized properties. Scene mutations are wrapped in Unity's Undo system (so a multi-step action reverts as one collapsible step) and are blocked during Play mode. Objects are referenced by an `ObjectRef` handle (globalId/path/guid/instanceId/hierarchyPath), and results come back as `AuthoringResult` identities you can chain into a follow-up call.
 
-### `create_gameobject`
+Every command writes its result to stdout and its errors to stderr. A handle that resolves to nothing, or a component type, tag, layer or property name that doesn't exist, exits `NotFound`; an empty handle, a handle to the wrong kind of object, or arguments that don't fit together exit `InvalidUsage`. A failed command changes nothing.
+
+### `gameobject create`
 Create an empty GameObject or a built-in primitive (cube/sphere/capsule/cylinder/plane/quad) in the active scene.
 
 | Parameter | Required | Default | Description |
@@ -11,10 +13,11 @@ Create an empty GameObject or a built-in primitive (cube/sphere/capsule/cylinder
 | `primitive` | no | `–` | Optional primitive type: cube, sphere, capsule, cylinder, plane, quad. Omit for an empty GameObject. |
 | `parent` | no | `–` | Optional parent handle (globalId/path/guid/instanceId/hierarchyPath). The new object becomes a child of it. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the new GameObject.
+**Fails:** `InvalidUsage` for an unknown `primitive`; `NotFound` when `parent` doesn't resolve.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `create_gameobjects`
+### `gameobject create_many`
 Batch-create N empty GameObjects or primitives in one call. Optional positions/rotations/scales are arrays of [x,y,z] (length must equal count). Returns the created identities.
 
 | Parameter | Required | Default | Description |
@@ -27,10 +30,11 @@ Batch-create N empty GameObjects or primitives in one call. Optional positions/r
 | `rotations` | no | `–` | Local Euler rotations (degrees), one [x,y,z] per object. Length must equal count when supplied. |
 | `scales` | no | `–` | Local scales, one [x,y,z] per object. Length must equal count when supplied. |
 
-**Returns:** `CreateGameObjectsResult`
+**Returns:** One `AuthoringResult` record per created GameObject, in creation order.
+**Fails:** `InvalidUsage` when `count` is below 1, a `positions`/`rotations`/`scales` array doesn't have `count` entries of `[x,y,z]` (the error names the offending index), or `primitive` is unknown; `NotFound` when `parent` doesn't resolve. Validation runs before anything is created, so a rejected batch creates nothing.
 **Notes:** Undo-able (the whole batch reverts as one step); blocked during Play mode.
 
-### `find_gameobjects`
+### `gameobject find`
 Find GameObjects in loaded scenes by name, tag, component type, and/or hierarchy path (filters are combined). Returns structured identities.
 
 | Parameter | Required | Default | Description |
@@ -38,12 +42,13 @@ Find GameObjects in loaded scenes by name, tag, component type, and/or hierarchy
 | `name` | no | `–` | Exact name to match. |
 | `tag` | no | `–` | Tag to match (e.g. 'Player'). |
 | `type` | no | `–` | Component type name to match (e.g. 'Rigidbody', 'UnityEngine.Camera'). |
-| `hierarchy_path` | no | `–` | Exact hierarchy path to match (e.g. '/Root/Child'). |
-| `include_inactive` | no | `true` | Include inactive GameObjects. Default true. |
+| `hierarchy-path` | no | `–` | Exact hierarchy path to match (e.g. '/Root/Child'). |
+| `include-inactive` | no | `true` | Include inactive GameObjects. Default true. |
 
-**Returns:** `FindGameObjectsResult`
+**Returns:** One `AuthoringResult` record per matching GameObject. Nothing when no GameObject matches (including a `tag` that isn't defined in the project).
+**Fails:** `NotFound` when `type` names no component type.
 
-### `set_transform`
+### `gameobject set_transform`
 Set a GameObject's local position/rotation(euler)/scale. Omitted channels are left unchanged.
 
 | Parameter | Required | Default | Description |
@@ -53,22 +58,23 @@ Set a GameObject's local position/rotation(euler)/scale. Omitted channels are le
 | `rotation` | no | `–` | Local rotation as Euler angles [x,y,z] in degrees. |
 | `scale` | no | `–` | Local scale as [x,y,z]. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the GameObject.
+**Fails:** `InvalidUsage` when a channel isn't an `[x,y,z]` array; every channel is checked before any is applied.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `set_parent`
+### `gameobject set_parent`
 Reparent a GameObject under a new parent, or detach it to scene root when no parent is given.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `target` | yes | – | Handle of the GameObject to reparent. |
 | `parent` | no | `–` | Handle of the new parent. Omit (or empty) to move the object to the scene root. |
-| `world_position_stays` | no | `true` | Keep the object's world position when reparenting. Default true. |
+| `world-position-stays` | no | `true` | Keep the object's world position when reparenting. Default true. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the reparented GameObject.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `set_active`
+### `gameobject set_active`
 Set a GameObject's active self-state (activeSelf).
 
 | Parameter | Required | Default | Description |
@@ -76,10 +82,10 @@ Set a GameObject's active self-state (activeSelf).
 | `target` | yes | – | Handle of the GameObject. |
 | `active` | yes | – | Desired active state. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the GameObject.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `set_tag`
+### `gameobject set_tag`
 Set a GameObject's tag (the tag must already exist in the project).
 
 | Parameter | Required | Default | Description |
@@ -87,10 +93,11 @@ Set a GameObject's tag (the tag must already exist in the project).
 | `target` | yes | – | Handle of the GameObject. |
 | `tag` | yes | – | Tag to assign (must exist in the Tag Manager). |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the GameObject.
+**Fails:** `NotFound` when the tag isn't defined in the Tag Manager.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `set_layer`
+### `gameobject set_layer`
 Set a GameObject's layer by name or numeric index (0-31).
 
 | Parameter | Required | Default | Description |
@@ -98,10 +105,11 @@ Set a GameObject's layer by name or numeric index (0-31).
 | `target` | yes | – | Handle of the GameObject. |
 | `layer` | yes | – | Layer name (e.g. 'UI') or numeric index 0-31. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the GameObject.
+**Fails:** `InvalidUsage` for an index outside 0-31; `NotFound` for a layer name the project doesn't define.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `rename_gameobject`
+### `gameobject rename`
 Rename a GameObject.
 
 | Parameter | Required | Default | Description |
@@ -109,20 +117,21 @@ Rename a GameObject.
 | `target` | yes | – | Handle of the GameObject. |
 | `name` | yes | – | New name. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the renamed GameObject.
+**Fails:** `InvalidUsage` for an empty name.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `delete_gameobject`
+### `gameobject delete`
 Delete a GameObject from the scene (reversible via Undo).
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `target` | yes | – | Handle of the GameObject to delete. |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the deleted GameObject.
 **Notes:** Undo-able; blocked during Play mode. The result describes the object's identity captured before destruction.
 
-### `add_component`
+### `component add`
 Add a component (by type name) to a GameObject.
 
 | Parameter | Required | Default | Description |
@@ -130,10 +139,11 @@ Add a component (by type name) to a GameObject.
 | `target` | yes | – | Handle of the GameObject. |
 | `type` | yes | – | Component type name (e.g. 'Rigidbody' or 'UnityEngine.Camera'). |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the new component.
+**Fails:** `NotFound` when `type` names no component type; `Failed` when Unity refuses the component on this GameObject.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `remove_component`
+### `component remove`
 Remove a component from a GameObject. Provide either a component handle (target) or a GameObject handle (target) plus a type name.
 
 | Parameter | Required | Default | Description |
@@ -141,10 +151,11 @@ Remove a component from a GameObject. Provide either a component handle (target)
 | `target` | yes | – | Handle of the component to remove, OR of the GameObject when 'type' is given. |
 | `type` | no | `–` | Component type name to remove from the target GameObject (omit when 'target' already points at a component). |
 
-**Returns:** `AuthoringResult`
+**Returns:** `AuthoringResult` of the removed component, captured before removal.
+**Fails:** `InvalidUsage` when `target` is a GameObject and `type` is omitted, or `target` is a component that isn't a `type`; `NotFound` when the GameObject has no such component.
 **Notes:** Undo-able; blocked during Play mode.
 
-### `get_component_properties`
+### `component get_properties`
 Get a component's serialized properties as a JSON map. Address the component by handle, or by GameObject handle + type.
 
 | Parameter | Required | Default | Description |
@@ -152,9 +163,9 @@ Get a component's serialized properties as a JSON map. Address the component by 
 | `target` | yes | – | Handle of the component, OR of the GameObject when 'type' is given. |
 | `type` | no | `–` | Component type name on the target GameObject (omit when 'target' is a component handle). |
 
-**Returns:** `ComponentPropertiesResult`
+**Returns:** `ComponentPropertiesResult`: `{ component: AuthoringResult, properties: { name: value } }`. A property that can't be read has the value `"<error:…>"` and logs a warning.
 
-### `set_component_properties`
+### `component set_properties`
 Set serialized properties on a component (one Undo step). 'properties' maps property name -> value; object references accept an ObjectRef handle.
 
 | Parameter | Required | Default | Description |
@@ -163,7 +174,8 @@ Set serialized properties on a component (one Undo step). 'properties' maps prop
 | `properties` | yes | – | Map of serialized property name to value. Vectors/colors are arrays; object refs are handle objects. |
 | `type` | no | `–` | Component type name on the target GameObject (omit when 'target' is a component handle). |
 
-**Returns:** `ComponentPropertiesResult`
-**Notes:** Undo-able (one Undo step); blocked during Play mode. An unknown property name fails the whole batch (no partial apply).
+**Returns:** `ComponentPropertiesResult` with the committed values, re-read after the write.
+**Fails:** `InvalidUsage` for an empty `properties`; `NotFound` for an unknown property name, which fails the whole batch (no partial apply).
+**Notes:** Undo-able (one Undo step); blocked during Play mode.
 
 See [Creating commands](../creating-commands.md) and [Connectivity](../connectivity.md).

@@ -12,19 +12,20 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
     /// </summary>
     static class QualitySettingsCommands
     {
-        const string Group = "quality";
+        const string Domain = "quality";
+        const string Group = "settings." + Domain;
 
-        [CliCommand("get_quality_settings", "Read QualitySettings (current level, level names, vSync, anti-aliasing).", MainThreadRequired = true, Tags = new[] { "settings/quality" })]
-        public static ProjectSettingsResponse Get() => ProjectSettingsCommand.Get(Group, Read);
+        [CliGroupCommand(Group, "Read QualitySettings (current level, level names, vSync, anti-aliasing).", MainThreadRequired = true, Tags = new[] { "settings/quality" }, Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode Get(CommandContext cmd) => ProjectSettingsCommand.Get(cmd, Domain, Read);
 
-        [CliCommand("set_quality_settings", "Change QualitySettings. Requires confirm=true; use dry_run to preview. Not undoable via Ctrl+Z.", MainThreadRequired = true, Tags = new[] { "settings/quality" })]
-        public static ProjectSettingsResponse Set(
+        [CliGroupCommand(Group, "Change QualitySettings. Requires confirm=true; use dry-run to preview. Not undoable via Ctrl+Z.", MainThreadRequired = true, Tags = new[] { "settings/quality" }, Effect = CommandEffect.Destructive)]
+        internal static ExitCode Set(CommandContext cmd,
             [CliArg("settings", "Fields to change; omitted fields are left unchanged.")] QualitySettingsInput settings = null,
             [CliArg("confirm", "Apply the change. Without it the call is refused.")] bool confirm = false,
-            [CliArg("dry_run", "Preview the change without applying it.")] bool dryRun = false)
+            [CliArg("dry-run", "Preview the change without applying it.")] bool dryRun = false)
         {
             if (settings == null)
-                return ProjectSettingsResponse.Fail(Group, "No 'settings' object provided.");
+                return ProjectSettingsCommand.Fail(cmd, ExitCode.InvalidUsage, "No 'settings' object provided.");
 
             var names = QualitySettings.names;
             var changes = new List<string>();
@@ -32,18 +33,18 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
             if (settings.Level.HasValue)
             {
                 if (settings.Level.Value < 0 || settings.Level.Value >= names.Length)
-                    return ProjectSettingsResponse.Fail(Group, $"level {settings.Level.Value} out of range (0..{names.Length - 1}).");
+                    return ProjectSettingsCommand.Fail(cmd, ExitCode.InvalidUsage, $"level {settings.Level.Value} out of range (0..{names.Length - 1}).");
                 if (settings.Level.Value != QualitySettings.GetQualityLevel())
                     changes.Add($"level {QualitySettings.GetQualityLevel()} -> {settings.Level.Value}");
             }
 
             if (settings.VSyncCount.HasValue && settings.VSyncCount.Value != QualitySettings.vSyncCount)
-                changes.Add($"vSyncCount {QualitySettings.vSyncCount} -> {settings.VSyncCount.Value}");
+                changes.Add($"vsync-count {QualitySettings.vSyncCount} -> {settings.VSyncCount.Value}");
             if (settings.AntiAliasing.HasValue && settings.AntiAliasing.Value != QualitySettings.antiAliasing)
-                changes.Add($"antiAliasing {QualitySettings.antiAliasing} -> {settings.AntiAliasing.Value}");
+                changes.Add($"anti-aliasing {QualitySettings.antiAliasing} -> {settings.AntiAliasing.Value}");
 
             if (changes.Count == 0)
-                return NoChanges();
+                return ProjectSettingsCommand.NoChanges(cmd, Domain, Read);
 
             var planText = "Set quality settings: " + string.Join("; ", changes);
 
@@ -55,14 +56,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
                 AssetDatabase.SaveAssets();
             }
 
-            return ProjectSettingsCommand.Apply(Group, confirm, dryRun, settings, () => planText, Apply, Read);
-        }
-
-        static ProjectSettingsResponse NoChanges()
-        {
-            var response = ProjectSettingsCommand.Get(Group, Read);
-            response.Message = "No changes specified; nothing to apply.";
-            return response;
+            return ProjectSettingsCommand.Apply(cmd, Domain, confirm, dryRun, settings, () => planText, Apply, Read);
         }
 
         static Dictionary<string, object> Read()
@@ -72,10 +66,10 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
             return new Dictionary<string, object>
             {
                 ["level"] = level,
-                ["levelName"] = (level >= 0 && level < names.Length) ? names[level] : null,
-                ["levelNames"] = names,
-                ["vSyncCount"] = QualitySettings.vSyncCount,
-                ["antiAliasing"] = QualitySettings.antiAliasing
+                ["level-name"] = (level >= 0 && level < names.Length) ? names[level] : null,
+                ["level-names"] = names,
+                ["vsync-count"] = QualitySettings.vSyncCount,
+                ["anti-aliasing"] = QualitySettings.antiAliasing
             };
         }
     }
@@ -83,13 +77,13 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
     /// <summary>Quality settings to change. Null/omitted fields are left unchanged.</summary>
     class QualitySettingsInput : IStructuredCommandInput
     {
-        [CliArg("level", "Quality level index (see levelNames from get_quality_settings).")]
+        [CliArg("level", "Quality level index (see level-names from " + CommandNames.SettingsQualityGet + ").")]
         public int? Level { get; set; }
 
-        [CliArg("vSyncCount", "VSync count (0 = off, 1, 2).")]
+        [CliArg("vsync-count", "VSync count (0 = off, 1, 2).")]
         public int? VSyncCount { get; set; }
 
-        [CliArg("antiAliasing", "MSAA sample count (0, 2, 4, 8).")]
+        [CliArg("anti-aliasing", "MSAA sample count (0, 2, 4, 8).")]
         public int? AntiAliasing { get; set; }
     }
 }

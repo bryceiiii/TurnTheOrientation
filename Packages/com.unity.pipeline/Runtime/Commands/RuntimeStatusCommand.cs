@@ -14,8 +14,17 @@ namespace Unity.Pipeline.Runtime.Commands
     /// </summary>
     static class RuntimeStatusCommand
     {
-        [CliCommand("runtime_status", "Get comprehensive runtime application status", MainThreadRequired = true, RuntimeOnly = true, Tags = new[] { "runtime" })]
-        public static RuntimeStatusResponse GetRuntimeStatus()
+        const string Group = "runtime";
+
+        [CliGroupCommand(Group, "Get comprehensive runtime application status", MainThreadRequired = true, Tags = new[] { "runtime" }, Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode Status(CommandContext cmd)
+        {
+            cmd.Result.Write(BuildStatus());
+            return ExitCode.Success;
+        }
+
+        /// <summary>The application's runtime state, as <c>runtime status</c> reports it.</summary>
+        internal static RuntimeStatusResponse BuildStatus()
         {
             try
             {
@@ -28,7 +37,7 @@ namespace Unity.Pipeline.Runtime.Commands
                     Version = Application.version,
 
                     // Runtime state
-                    IsPlaying = true, // Always true in Player builds
+                    IsPlaying = Application.isPlaying,
                     TargetFrameRate = Application.targetFrameRate,
                     TimeScale = Time.timeScale,
                     RealTimeSinceStartup = Time.realtimeSinceStartup,
@@ -58,8 +67,9 @@ namespace Unity.Pipeline.Runtime.Commands
         }
 
         /// <summary>
-        /// Null when no driver was ever bootstrapped (e.g. enableInBuilds was false), otherwise the
-        /// driver's actual running state and the config values presently governing it.
+        /// Null when no driver was ever bootstrapped (e.g. the Pipeline is not built into this
+        /// build), otherwise the driver's actual running state and the config values presently
+        /// governing it.
         /// maxWorkItemsPerFrame is read via CurrentMaxWorkItemsPerFrame rather than the config
         /// directly, since that field alone can be tuned live after the driver started.
         /// </summary>
@@ -74,8 +84,6 @@ namespace Unity.Pipeline.Runtime.Commands
             {
                 IsServerRunning = driver.IsServerRunning,
                 ActualPort = driver.ActualPort,
-                EnableInBuilds = config != null && config.enableInBuilds,
-                RequestTimeoutMs = config != null ? config.requestTimeoutMs : 0,
                 EnableAuditLogging = config != null && config.enableAuditLogging,
                 AutoStart = config != null && config.autoStart,
                 MaxWorkItemsPerFrame = driver.CurrentMaxWorkItemsPerFrame
@@ -140,7 +148,7 @@ namespace Unity.Pipeline.Runtime.Commands
         public string Version { get; set; }
         
         // Runtime State
-        public bool IsPlaying { get; set; } // Always true for Player builds
+        public bool IsPlaying { get; set; }
         public int TargetFrameRate { get; set; }
         public float TimeScale { get; set; }
         public float RealTimeSinceStartup { get; set; }
@@ -172,8 +180,6 @@ namespace Unity.Pipeline.Runtime.Commands
     {
         public bool IsServerRunning { get; set; }
         public int ActualPort { get; set; }
-        public bool EnableInBuilds { get; set; }
-        public int RequestTimeoutMs { get; set; }
         public bool EnableAuditLogging { get; set; }
         public bool AutoStart { get; set; }
 

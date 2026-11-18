@@ -4,6 +4,9 @@ using System.IO;
 using System.Threading;
 using Newtonsoft.Json;
 using UnityEngine;
+#if UNITY_6000_5_OR_NEWER
+using Unity.Scripting.LifecycleManagement;
+#endif
 
 #if UNITY_EDITOR
 using System.Threading.Tasks;
@@ -22,7 +25,10 @@ namespace Unity.Pipeline.Telemetry
         [JsonProperty("time")]
         public string Time { get; set; }
 
-        /// <summary>The command that ran the source: "eval" or "eval_file".</summary>
+        /// <summary>
+        /// The command that ran the source, as a user types it: "script eval". Records written
+        /// before 1.0 may name "script eval_file".
+        /// </summary>
         [JsonProperty("command")]
         public string Command { get; set; }
 
@@ -58,7 +64,7 @@ namespace Unity.Pipeline.Telemetry
     }
 
     /// <summary>
-    /// Local-first, privacy-first instrumentation of <c>eval</c>/<c>eval_file</c> (AUTHAPI-29). Per
+    /// Local-first, privacy-first instrumentation of <c>script eval</c> (AUTHAPI-29). Per
     /// invocation it appends one <see cref="EvalUsageRecord"/> to
     /// <c>&lt;project&gt;/Library/Pipeline/eval-usage.jsonl</c>. There is NO off-machine transmission:
     /// disabling <see cref="Enabled"/> stops even local recording, which satisfies "analytics opt-out
@@ -86,6 +92,9 @@ namespace Unity.Pipeline.Telemetry
     /// rotation rather than reset per session; <see cref="ReadRecords"/> merges the rotated ".old"
     /// file back in, bounding readable history to roughly 2× <see cref="MaxFileBytes"/>.
     /// </summary>
+#if UNITY_6000_5_OR_NEWER
+    [NoAutoStaticsCleanup]
+#endif
     static class EvalUsageTelemetry
     {
         /// <summary>
@@ -205,16 +214,17 @@ namespace Unity.Pipeline.Telemetry
 
         /// <summary>
         /// Block until every background record queued by <see cref="RecordInBackground"/> has been
-        /// flushed, or <paramref name="timeoutMs"/> elapses (returns false on timeout). Recording is
+        /// flushed, or <paramref name="timeout"/> (default 5 s) elapses (returns false on timeout). Recording is
         /// fire-and-forget, so tests (and teardown paths that delete the storage directory) drain the
         /// queue with this before asserting on / removing the JSONL.
         /// </summary>
-        public static bool WaitForPendingRecords(int timeoutMs = 5000)
+        public static bool WaitForPendingRecords(TimeSpan? timeout = null)
         {
+            var limit = timeout ?? TimeSpan.FromSeconds(5);
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             while (Volatile.Read(ref s_PendingRecords) > 0)
             {
-                if (stopwatch.ElapsedMilliseconds >= timeoutMs)
+                if (stopwatch.Elapsed >= limit)
                     return false;
                 Thread.Sleep(1);
             }
@@ -283,7 +293,7 @@ namespace Unity.Pipeline.Telemetry
 
         /// <summary>
         /// Bound the opt-in raw source at <see cref="MaxStoredSourceChars"/>, appending
-        /// <see cref="SourceTruncationMarker"/> when cut, so one giant eval_file body can't balloon
+        /// <see cref="SourceTruncationMarker"/> when cut, so one giant eval body can't balloon
         /// a single record (the JSONL size cap only rotates between appends).
         /// </summary>
         private static string BoundStoredSource(string code)

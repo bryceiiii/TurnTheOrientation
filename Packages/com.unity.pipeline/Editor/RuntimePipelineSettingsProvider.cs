@@ -22,6 +22,9 @@ namespace Unity.Pipeline.Editor
         /// disk. The caller owns the returned instance and must DestroyImmediate it when done, same
         /// as RuntimePipelineConfig.Load().
         /// </summary>
+        /// <summary>Settings window path of this page, shared with the Window > Pipeline menu.</summary>
+        internal const string SettingsPath = "Project/Pipeline/Runtime";
+
         public static RuntimePipelineConfig LoadOrCreateConfig() =>
             RuntimePipelineConfig.Load() ?? ScriptableObject.CreateInstance<RuntimePipelineConfig>();
 
@@ -47,7 +50,7 @@ namespace Unity.Pipeline.Editor
                 loadedWriteTimeUtc = RuntimePipelineConfig.GetSettingsFileWriteTimeUtc();
             }
 
-            return new SettingsProvider("Project/Pipeline/Runtime", SettingsScope.Project)
+            return new SettingsProvider(SettingsPath, SettingsScope.Project)
             {
                 label = "Runtime",
                 activateHandler = (_, __) => Reload(),
@@ -82,7 +85,7 @@ namespace Unity.Pipeline.Editor
                         loadedWriteTimeUtc = RuntimePipelineConfig.GetSettingsFileWriteTimeUtc();
                     }
                 },
-                keywords = new HashSet<string>(new[] { "Pipeline", "Runtime", "Hot Reload", "Server", "CLI" })
+                keywords = new HashSet<string>(new[] { "Pipeline", "Runtime", "Method Reload", "Server", "CLI" })
             };
         }
     }

@@ -4,10 +4,12 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Unity.Pipeline.Commands;
 using UnityEditor;
 using UnityEditor.TestTools.TestRunner.Api;
 using UnityEngine;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 #if UNITY_6000_5_OR_NEWER
 using Unity.Scripting.LifecycleManagement;
 #endif
@@ -23,143 +25,99 @@ namespace Unity.Pipeline.Editor.Testing
 #endif
     static class PipelineTestRunner
     {
-        private const string TestRequestFile = "Temp/pipeline_test_request.json";
-        private const string TestStatusFile = "Temp/pipeline_test_status.json";
+        // Consts are inlined at compile time, so PipelineTestReloader can read them without
+        // loading this class (whose fields need UnityEditor.TestRunner to resolve).
+        internal const string TestRequestFile = "Temp/pipeline_test_request.json";
+        internal const string TestStatusFile = "Temp/pipeline_test_status.json";
+        /// <summary>The EditMode half's results of an 'all' run, kept on disk while its PlayMode half runs.</summary>
+        internal const string TestPartialFile = "Temp/pipeline_test_partial.json";
 
-        private static TestRunnerApi m_ActiveApi;
-        private static TestResultCollector m_ActiveCollector;
+        internal static TestResultCollector m_ActiveCollector;
+
+        /// <summary>The Test Framework's id for the run in flight, so it can be cancelled.</summary>
+        internal static string s_ActiveRunId;
+
+        internal static readonly string SyncRunInterruptedMessage =
+            $"A domain reload interrupted a synchronous {CommandNames.TestRun}, so its results could not be returned " +
+            $"(the editor may still be running the tests; {CommandNames.TestCancel} stops them). Tests that recompile scripts or reload the domain need " +
+            $"{CommandNames.TestRun} --mode editor --async-tests true, then poll {CommandNames.TestStatus} for the results.";
+
+        /// <summary>Stops a Test Framework run by id. Tests replace it to see which run is stopped.</summary>
+        internal static Func<string, bool> s_CancelTestRun = TestRunnerApi.CancelTestRun;
 
         /// <summary>
         /// Execute tests with the given parameters
         /// </summary>
         /// <param name="mode">"editor"/"editmode", "playmode"/"play", or "all".</param>
         /// <param name="filter">Filter value to match against, per <paramref name="filterType"/>.</param>
-        /// <param name="filterType">"testname", "assembly", or "category".</param>
+        /// <param name="filterType">What <paramref name="filter"/> is matched against.</param>
         /// <param name="includeExplicit">Whether to include tests/fixtures marked [Explicit].</param>
         /// <param name="asyncMode">Run asynchronously, returning immediately with a status path to poll.</param>
-        /// <param name="timeoutSeconds">Timeout for synchronous execution.</param>
+        /// <param name="timeout">Timeout for synchronous execution.</param>
         /// <returns>The test execution response.</returns>
         public static async Task<TestExecutionResponse> ExecuteTestsAsync(
             string mode,
             string filter,
-            string filterType,
+            TestFilterType filterType,
             bool includeExplicit,
             bool asyncMode,
-            int timeoutSeconds)
+            TimeSpan timeout)
         {
             try
             {
+                if (!Enum.IsDefined(typeof(TestFilterType), filterType))
+                {
+                    return CreateUsageErrorResponse($"Invalid filter-type '{filterType}'. Use TestName, Assembly, or Category.");
+                }
+
                 var parsedMode = ParseTestMode(mode);
                 if (!parsedMode.IsValid)
                 {
-                    return CreateErrorResponse($"Invalid mode '{mode}'. Use 'editor', 'playmode', or 'all'");
+                    return CreateUsageErrorResponse($"Invalid mode '{mode}'. Use 'editor', 'playmode', or 'all'.");
                 }
 
-                // Validate filter type
-                var normalizedFilterType = filterType?.ToLower() ?? "testname";
-                if (!string.IsNullOrEmpty(filter) &&
-                    normalizedFilterType != "testname" && normalizedFilterType != "assembly" && normalizedFilterType != "category")
+                if (parsedMode.IsAll && !asyncMode)
                 {
-                    return CreateErrorResponse($"Invalid filterType '{filterType}'. Valid options: testName, assembly, category");
+                    // 'all' includes PlayMode, which can't finish over one request (see below).
+                    // Refuse it rather than return half the results.
+                    return CreateUsageErrorResponse(
+                        "'all' includes PlayMode tests, which cannot run synchronously over HTTP: entering play mode " +
+                        $"triggers a domain reload that drops the request. Re-run asynchronously ({CommandNames.TestRun} --mode " +
+                        $"all --async-tests) and poll the {CommandNames.TestStatus} command for results.");
                 }
 
-                // Cancel any previous run
-                InvalidatePreviousRun();
-
-                if (parsedMode.IsAll)
-                {
-                    // Handle "all" mode by running both editor and playmode tests
-                    return await ExecuteAllModesAsync(filter, normalizedFilterType, includeExplicit, asyncMode, timeoutSeconds);
-                }
-                else if (asyncMode)
-                {
-                    return await ExecuteAsyncMode(parsedMode.TestMode, filter, normalizedFilterType, includeExplicit, timeoutSeconds);
-                }
-                else if (parsedMode.TestMode == TestMode.PlayMode)
+                if (!parsedMode.IsAll && !asyncMode && parsedMode.TestMode == TestMode.PlayMode)
                 {
                     // PlayMode entry triggers a domain reload that drops the in-flight HTTP request,
                     // so a synchronous playmode run can never return results over one call. Fail fast
                     // with guidance instead of hanging until the connection resets.
-                    return CreateErrorResponse(
+                    return CreateUsageErrorResponse(
                         "PlayMode tests cannot run synchronously over HTTP: entering play mode triggers a " +
-                        "domain reload that drops the request. Re-run asynchronously (run_tests --mode " +
-                        "playmode --async_tests) and poll the test_status command for results.");
+                        $"domain reload that drops the request. Re-run asynchronously ({CommandNames.TestRun} --mode " +
+                        $"playmode --async-tests) and poll the {CommandNames.TestStatus} command for results.");
+                }
+
+                var normalizedFilterType = filterType.ToString().ToLowerInvariant();
+
+                // Cancel any previous run
+                InvalidatePreviousRun();
+
+                if (asyncMode)
+                {
+                    // An 'all' run starts with its EditMode half; FinishAsyncRun starts the PlayMode half.
+                    var firstMode = parsedMode.IsAll ? TestMode.EditMode : parsedMode.TestMode;
+                    return await ExecuteAsyncMode(firstMode, filter, normalizedFilterType, includeExplicit, allModes: parsedMode.IsAll);
                 }
                 else
                 {
-                    return await ExecuteSyncMode(parsedMode.TestMode, filter, normalizedFilterType, includeExplicit, timeoutSeconds);
+                    var run = await ExecuteSyncMode(parsedMode.TestMode, filter, normalizedFilterType, includeExplicit, timeout);
+                    return TestRunVerdict.Judge(run, zeroTestsFail: true);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!(ex is PipelineTimeoutException))
             {
                 Debug.LogError($"[PipelineTestRunner] Error: {ex.Message}");
                 return CreateErrorResponse($"Failed to run tests: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Execute tests in all modes (editor + playmode)
-        /// </summary>
-        private static async Task<TestExecutionResponse> ExecuteAllModesAsync(
-            string filter,
-            string filterType,
-            bool includeExplicit,
-            bool asyncMode,
-            int timeoutSeconds)
-        {
-            if (asyncMode)
-            {
-                return CreateErrorResponse("Async mode is not supported for 'all' mode. Use 'editor' or 'playmode' for async execution.");
-            }
-
-            var startTime = DateTime.UtcNow;
-
-            try
-            {
-                // EditMode runs synchronously over HTTP (no domain reload), so its results are
-                // returned in this response.
-                Debug.Log("[PipelineTestRunner] Running editor tests (all mode)...");
-                var editorResponse = await ExecuteSyncMode(TestMode.EditMode, filter, filterType, includeExplicit, timeoutSeconds);
-
-                if (!editorResponse.Success)
-                {
-                    return editorResponse; // Return error immediately
-                }
-
-                // PlayMode can't run synchronously over HTTP (entering play mode triggers a domain
-                // reload that drops the request), so start it asynchronously and hand back a
-                // StatusPath. The caller polls the test_status command for the playmode results.
-                Debug.Log("[PipelineTestRunner] Starting playmode tests asynchronously (all mode)...");
-                var playmodeStart = await ExecuteAsyncMode(TestMode.PlayMode, filter, filterType, includeExplicit, timeoutSeconds);
-
-                if (!playmodeStart.Success)
-                {
-                    return playmodeStart; // Return error immediately
-                }
-
-                // Build combined response: editor results inline, playmode running async.
-                var duration = (DateTime.UtcNow - startTime).TotalSeconds;
-                return new TestExecutionResponse
-                {
-                    Success = true,
-                    Command = "run_tests",
-                    Duration = Math.Round(duration, 2),
-                    Mode = "All",
-                    FilterApplied = string.IsNullOrEmpty(filter) ? null : $"{filterType}: {filter}",
-                    ExecutionTimeMs = (int)(duration * 1000),
-                    Summary = editorResponse.Summary,
-                    Results = editorResponse.Results,
-                    Result = "playmode_running",
-                    StatusPath = playmodeStart.StatusPath,
-                    Message = $"EditMode complete: {editorResponse.Summary.Passed}/{editorResponse.Summary.Total} passed. " +
-                              "PlayMode tests started asynchronously — poll the test_status command for their results.",
-                    ExecutedAt = DateTime.UtcNow
-                };
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[PipelineTestRunner] All modes execution error: {ex.Message}");
-                return CreateErrorResponse($"Failed to execute tests in all modes: {ex.Message}");
             }
         }
 
@@ -171,51 +129,44 @@ namespace Unity.Pipeline.Editor.Testing
             string filter,
             string filterType,
             bool includeExplicit,
-            int timeoutSeconds)
+            TimeSpan timeout)
         {
             var startTime = DateTime.UtcNow;
             var api = ScriptableObject.CreateInstance<TestRunnerApi>();
             var collector = new TestResultCollector();
 
-            m_ActiveApi = api;
             m_ActiveCollector = collector;
 
             // Set up timeout cancellation
-            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
+            using (var cts = new CancellationTokenSource(PipelineTimeout.StopBefore(timeout)))
             {
-                cts.Token.Register(() =>
-                {
-                    Debug.Log("[PipelineTestRunner] Test execution timed out, cancelling...");
-                    InvalidatePreviousRun();
-                });
-
                 try
                 {
-                    // For PlayMode tests, we need to handle domain reloads
-                    if (testMode == TestMode.PlayMode)
+                    // Record the run so that, if a test reloads the domain (dropping this request),
+                    // CheckForPendingTests can tell the caller why through the test status command.
+                    if (File.Exists(TestStatusFile))
+                        File.Delete(TestStatusFile);
+                    var request = new TestRequest
                     {
-                        // Save request for domain reload recovery
-                        var request = new TestRequest
-                        {
-                            filter = filter,
-                            filterType = filterType,
-                            mode = testMode.ToString(),
-                            includeExplicit = includeExplicit,
-                            isSync = true
-                        };
-                        File.WriteAllText(TestRequestFile, JsonConvert.SerializeObject(request));
-                    }
+                        filter = filter,
+                        filterType = filterType,
+                        mode = testMode.ToString(),
+                        includeExplicit = includeExplicit,
+                        isSync = true
+                    };
+                    File.WriteAllText(TestRequestFile, JsonConvert.SerializeObject(request));
 
-                    // Execute tests and wait for completion
+                    // Execute tests and wait for completion, or for the timeout: an invalidated
+                    // collector never reports the run finished, so the timeout ends the wait.
                     var completionTask = ExecuteTestsInternal(api, collector, testMode, filter, filterType, includeExplicit);
-                    var resultAdaptor = await completionTask;
+                    var resultAdaptor = await AwaitUnlessCanceled(completionTask, cts.Token);
 
                     // Build response
                     var duration = (DateTime.UtcNow - startTime).TotalSeconds;
                     var response = new TestExecutionResponse
                     {
                         Success = true,
-                        Command = "run_tests",
+                        Command = CommandNames.TestRun,
                         Duration = Math.Round(duration, 2),
                         Mode = testMode.ToString(),
                         FilterApplied = string.IsNullOrEmpty(filter) ? null : $"{filterType}: {filter}",
@@ -232,24 +183,24 @@ namespace Unity.Pipeline.Editor.Testing
                         ExecutedAt = DateTime.UtcNow
                     };
 
-                    // Clean up PlayMode request file
-                    CleanupRequestFile();
-
                     return response;
                 }
                 catch (OperationCanceledException)
                 {
-                    return CreateErrorResponse("Test execution timed out");
+                    // Back on the main thread here (the timer callback is not), as CancelTestRun needs.
+                    Debug.Log("[PipelineTestRunner] Test execution timed out, cancelling...");
+                    InvalidatePreviousRun();
+                    throw new PipelineTimeoutException(CommandNames.TestRun, timeout, started: true);
                 }
                 catch (Exception ex)
                 {
                     Debug.LogError($"[PipelineTestRunner] Sync execution error: {ex.Message}");
-                    CleanupRequestFile();
                     return CreateErrorResponse($"Test execution failed: {ex.Message}");
                 }
                 finally
                 {
-                    UnregisterCollector(api, collector);
+                    CleanupRequestFile();
+                    UnregisterCollector(collector);
                 }
             }
         }
@@ -264,7 +215,7 @@ namespace Unity.Pipeline.Editor.Testing
             string filter,
             string filterType,
             bool includeExplicit,
-            int timeoutSeconds)
+            bool allModes)
         {
             try
             {
@@ -275,13 +226,15 @@ namespace Unity.Pipeline.Editor.Testing
                     filterType = filterType,
                     mode = testMode.ToString(),
                     includeExplicit = includeExplicit,
-                    isSync = false
+                    isSync = false,
+                    allModes = allModes
                 };
                 File.WriteAllText(TestRequestFile, JsonConvert.SerializeObject(request));
 
-                // Clear any previous status
+                // Clear any previous status, and a previous 'all' run's EditMode results
                 if (File.Exists(TestStatusFile))
                     File.Delete(TestStatusFile);
+                DeletePartialFile();
 
                 // Start test execution now, on the main thread (run_tests is MainThreadRequired,
                 // so we are inside the editor update tick that dispatched this command). Must NOT
@@ -293,12 +246,12 @@ namespace Unity.Pipeline.Editor.Testing
                 return Task.FromResult(new TestExecutionResponse
                 {
                     Success = true,
-                    Command = "run_tests",
+                    Command = CommandNames.TestRun,
                     Result = "running",
                     StatusPath = TestStatusFile,
-                    Mode = testMode.ToString(),
+                    Mode = allModes ? "All" : testMode.ToString(),
                     FilterApplied = string.IsNullOrEmpty(filter) ? null : $"{filterType}: {filter}",
-                    Message = "Tests started in async mode. Poll /test-status for results.",
+                    Message = $"Tests started asynchronously. Poll {CommandNames.TestStatus} for the results.",
                     ExecutedAt = DateTime.UtcNow
                 });
             }
@@ -307,6 +260,21 @@ namespace Unity.Pipeline.Editor.Testing
                 Debug.LogError($"[PipelineTestRunner] Async setup error: {ex.Message}");
                 return Task.FromResult(CreateErrorResponse($"Failed to start async test execution: {ex.Message}"));
             }
+        }
+
+        /// <summary>
+        /// Awaits <paramref name="task"/>, or throws <see cref="OperationCanceledException"/> as soon
+        /// as <paramref name="token"/> fires, whichever comes first.
+        /// </summary>
+        internal static async Task<T> AwaitUnlessCanceled<T>(Task<T> task, CancellationToken token)
+        {
+            var canceled = new TaskCompletionSource<bool>();
+            using (token.Register(() => canceled.TrySetResult(true)))
+            {
+                if (await Task.WhenAny(task, canceled.Task) != task)
+                    throw new OperationCanceledException(token);
+            }
+            return await task;
         }
 
         /// <summary>
@@ -327,6 +295,10 @@ namespace Unity.Pipeline.Editor.Testing
             {
                 try
                 {
+                    // Discovery finishes on a later editor update: a timeout may have abandoned the run by now.
+                    if (collector.IsCancelled)
+                        return;
+
                     var testNames = CollectTestNames(rootTest, filter, filterType, includeExplicit);
 
                     if (testNames.Count == 0)
@@ -349,7 +321,7 @@ namespace Unity.Pipeline.Editor.Testing
                     collector.OnRunFinished = () => tcs.SetResult(collector.RootResult);
 
                     api.RegisterCallbacks(collector);
-                    api.Execute(new ExecutionSettings(testFilter));
+                    RecordRunId(api.Execute(new ExecutionSettings(testFilter)));
                 }
                 catch (Exception ex)
                 {
@@ -376,51 +348,53 @@ namespace Unity.Pipeline.Editor.Testing
                 api = ScriptableObject.CreateInstance<TestRunnerApi>();
                 collector = new TestResultCollector();
 
-                m_ActiveApi = api;
                 m_ActiveCollector = collector;
 
                 // Async completion: write results for pollers. Set once, never overwritten.
                 collector.OnRunFinished = () =>
                 {
-                    WriteCompletedResults(collector);
                     RestoreLiveServerIfDisrupted(); // B2: self-heal if a test broke the live server.
-                    CleanupRequestFile();
-                    UnregisterCollector(api, collector);
+                    UnregisterCollector(collector);
+                    FinishAsyncRun(CompletedStatus(collector));
                 };
 
                 api.RetrieveTestList(testMode, (ITestAdaptor rootTest) =>
                 {
                     try
                     {
+                        // Discovery finishes on a later editor update: test cancel or a newer run may
+                        // have abandoned this one, and now owns the request and status files.
+                        if (collector.IsCancelled)
+                            return;
+
                         var testNames = CollectTestNames(rootTest, filter, filterType, includeExplicit);
 
                         if (testNames.Count == 0)
                         {
-                            WriteStatusFile(new
+                            UnregisterCollector(collector);
+                            FinishAsyncRun(JObject.FromObject(new
                             {
                                 status = "completed",
                                 duration = 0.0,
                                 summary = new { total = 0, passed = 0, failed = 0, skipped = 0, inconclusive = 0 },
                                 results = new object[0]
-                            });
-                            CleanupRequestFile();
-                            UnregisterCollector(api, collector);
+                            }));
                             return;
                         }
 
                         api.RegisterCallbacks(collector);
-                        api.Execute(new ExecutionSettings(new Filter
+                        RecordRunId(api.Execute(new ExecutionSettings(new Filter
                         {
                             testMode = testMode,
                             testNames = testNames.ToArray()
-                        }));
+                        })));
                     }
                     catch (Exception ex)
                     {
                         Debug.LogError($"[PipelineTestRunner] Async run setup error: {ex.Message}");
                         WriteStatusFile(new { status = "error", message = ex.Message });
                         CleanupRequestFile();
-                        UnregisterCollector(api, collector);
+                        UnregisterCollector(collector);
                     }
                 });
             }
@@ -429,7 +403,7 @@ namespace Unity.Pipeline.Editor.Testing
                 Debug.LogError($"[PipelineTestRunner] Async execution error: {ex.Message}");
                 WriteStatusFile(new { status = "error", message = ex.Message });
                 CleanupRequestFile();
-                UnregisterCollector(api, collector);
+                UnregisterCollector(collector);
             }
         }
 
@@ -450,17 +424,15 @@ namespace Unity.Pipeline.Editor.Testing
             try
             {
                 api = ScriptableObject.CreateInstance<TestRunnerApi>();
-                collector = new TestResultCollector();
+                collector = new TestResultCollector(attachedMidRun: true);
 
-                m_ActiveApi = api;
                 m_ActiveCollector = collector;
 
                 collector.OnRunFinished = () =>
                 {
-                    WriteCompletedResults(collector);
                     RestoreLiveServerIfDisrupted();
-                    CleanupRequestFile();
-                    UnregisterCollector(api, collector);
+                    UnregisterCollector(collector);
+                    FinishAsyncRun(CompletedStatus(collector));
                 };
 
                 api.RegisterCallbacks(collector);
@@ -470,41 +442,35 @@ namespace Unity.Pipeline.Editor.Testing
                 Debug.LogError($"[PipelineTestRunner] Failed to reattach result collector: {ex.Message}");
                 WriteStatusFile(new { status = "error", message = ex.Message });
                 CleanupRequestFile();
-                UnregisterCollector(api, collector);
+                UnregisterCollector(collector);
             }
         }
 
-        /// <summary>
-        /// Called after domain reload to resume pending tests
-        /// </summary>
-        [InitializeOnLoad]
-        public static class TestReloader
-        {
-            static TestReloader()
-            {
-                EditorApplication.delayCall += CheckForPendingTests;
-            }
-        }
-
-        /// <summary>Resume any test run that was in flight before a domain reload dropped it.</summary>
+        /// <summary>Resume any test run that was in flight before a domain reload dropped it.
+        /// Invoked by <see cref="PipelineTestReloader"/>, which checks the request files first.</summary>
         public static void CheckForPendingTests()
         {
             if (!File.Exists(TestRequestFile)) return;
             if (File.Exists(TestStatusFile)) return; // Already completed
+            // The run's collector survived, so no reload interrupted it: this is a stale delayCall.
+            if (m_ActiveCollector != null) return;
 
             try
             {
                 var json = File.ReadAllText(TestRequestFile);
                 var request = JsonConvert.DeserializeObject<TestRequest>(json);
 
-                Debug.Log("[PipelineTestRunner] Reattaching result collector after domain reload");
                 if (request.isSync)
                 {
-                    // For sync mode, we can't really resume after domain reload
-                    // The command has already timed out or failed
-                    CleanupRequestFile();
+                    // The reload dropped the synchronous request, so its results can't be returned.
+                    // Say so through the status command instead of reporting no run at all.
+                    // Keep the request file: it names the run, which test cancel or the next run stops.
+                    Debug.LogWarning($"[PipelineTestRunner] {SyncRunInterruptedMessage}");
+                    WriteStatusFile(new { status = "error", message = SyncRunInterruptedMessage });
                     return;
                 }
+
+                Debug.Log("[PipelineTestRunner] Reattaching result collector after domain reload");
 
                 // The Unity Test Framework (TestJobDataHolder) auto-resumes the in-flight PlayMode
                 // run after a play-mode domain reload. We must NOT start a new run here: re-calling
@@ -637,25 +603,61 @@ namespace Unity.Pipeline.Editor.Testing
             }
         }
 
+        /// <summary>
+        /// Stops the previous run: stops listening to it and asks the Test Framework to cancel it,
+        /// which otherwise keeps running every remaining test. Main thread only (CancelTestRun).
+        /// </summary>
         private static void InvalidatePreviousRun()
         {
             if (m_ActiveCollector != null)
             {
                 m_ActiveCollector.Cancel();
-                UnregisterCollector(m_ActiveApi, m_ActiveCollector);
+                UnregisterCollector(m_ActiveCollector);
                 Debug.Log("[PipelineTestRunner] Invalidated previous test run");
+            }
+
+            // After a domain reload the static is gone, but the request file still names the run.
+            var runId = s_ActiveRunId ?? ReadRequest()?.runId;
+            s_ActiveRunId = null;
+            if (!string.IsNullOrEmpty(runId) && s_CancelTestRun(runId))
+                Debug.Log("[PipelineTestRunner] Cancelled the previous test run in the Test Framework");
+        }
+
+        /// <summary>Remembers the Test Framework's id for the run just started, in memory and in the request file.</summary>
+        private static void RecordRunId(string runId)
+        {
+            s_ActiveRunId = runId;
+            var request = ReadRequest();
+            if (request == null)
+                return;
+            request.runId = runId;
+            File.WriteAllText(TestRequestFile, JsonConvert.SerializeObject(request));
+        }
+
+        private static TestRequest ReadRequest()
+        {
+            try
+            {
+                return File.Exists(TestRequestFile)
+                    ? JsonConvert.DeserializeObject<TestRequest>(File.ReadAllText(TestRequestFile))
+                    : null;
+            }
+            catch (Exception ex) when (ex is IOException || ex is JsonException)
+            {
+                return null;
             }
         }
 
         /// <summary>
         /// Unregisters a collector from Unity's TestRunnerApi callback registry (process-wide, not
-        /// per-instance) and clears the active-run fields if they still point at it.
+        /// per-instance) and clears the active-run field if it still points at it. Unregisters
+        /// without the TestRunnerApi it was registered through, which a run's asset unload can destroy.
         /// </summary>
-        private static void UnregisterCollector(TestRunnerApi api, TestResultCollector collector)
+        internal static void UnregisterCollector(TestResultCollector collector)
         {
-            if (api != null && collector != null)
+            if (collector != null)
             {
-                try { api.UnregisterCallbacks(collector); }
+                try { TestRunnerApi.UnregisterTestCallback(collector); }
                 catch (Exception ex)
                 {
                     Debug.LogWarning($"[PipelineTestRunner] Could not unregister collector: {ex.Message}");
@@ -664,22 +666,35 @@ namespace Unity.Pipeline.Editor.Testing
 
             if (ReferenceEquals(m_ActiveCollector, collector))
             {
-                m_ActiveApi = null;
                 m_ActiveCollector = null;
             }
         }
 
-        private static TestExecutionResponse CreateErrorResponse(string message)
+        internal static TestExecutionResponse CreateErrorResponse(string message)
         {
             return new TestExecutionResponse
             {
                 Success = false,
-                Command = "run_tests",
+                Command = CommandNames.TestRun,
                 Error = message,
+                FailureStatusCode = 500,
                 Results = new List<TestResult>(),
                 Summary = new TestSummary(),
                 ExecutedAt = DateTime.UtcNow
             };
+        }
+
+        private static TestExecutionResponse CreateUsageErrorResponse(string message)
+        {
+            var response = new TestExecutionResponse
+            {
+                Command = CommandNames.TestRun,
+                Results = new List<TestResult>(),
+                Summary = new TestSummary(),
+                ExecutedAt = DateTime.UtcNow
+            };
+            TestRunVerdict.MarkUsageError(response, message);
+            return response;
         }
 
         private static ITestResultAdaptor CreateEmptyTestResult()
@@ -702,7 +717,7 @@ namespace Unity.Pipeline.Editor.Testing
             {
                 var server = PipelineServerStartup.Server;
                 var root = Path.GetDirectoryName(Application.dataPath);
-                var descriptor = Unity.Pipeline.Models.InstanceDescriptor.ReadFromProjectRoot(root);
+                var descriptor = Unity.Pipeline.Models.EditorInstanceDescriptor.ReadFromProjectRoot(root);
 
                 var disrupted = server == null
                                 || !server.IsRunning
@@ -721,18 +736,16 @@ namespace Unity.Pipeline.Editor.Testing
             }
         }
 
-        private static void WriteCompletedResults(TestResultCollector collector)
+        /// <summary>A finished async run's status payload: its summary and results, or an error.</summary>
+        private static JObject CompletedStatus(TestResultCollector collector)
         {
             try
             {
                 if (!collector.IsComplete)
-                {
-                    WriteStatusFile(new { status = "error", message = "Tests did not complete" });
-                    return;
-                }
+                    return JObject.FromObject(new { status = "error", message = "Tests did not complete" });
 
                 var root = collector.RootResult;
-                var result = new
+                return JObject.FromObject(new
                 {
                     status = "completed",
                     duration = Math.Round(root.Duration, 2),
@@ -745,15 +758,91 @@ namespace Unity.Pipeline.Editor.Testing
                         inconclusive = root.InconclusiveCount
                     },
                     results = collector.Results.ToArray()
-                };
-
-                WriteStatusFile(result);
+                });
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[PipelineTestRunner] Failed to write results: {ex.Message}");
-                WriteStatusFile(new { status = "error", message = ex.Message });
+                Debug.LogError($"[PipelineTestRunner] Failed to collect results: {ex.Message}");
+                return JObject.FromObject(new { status = "error", message = ex.Message });
             }
+        }
+
+        /// <summary>
+        /// Ends one async run with <paramref name="status"/>. The EditMode half of an 'all' run that
+        /// completed instead keeps its results in <see cref="TestPartialFile"/> and starts the PlayMode
+        /// half, so the run stays "running"; the PlayMode half's status is merged with them. Both halves
+        /// run even when EditMode tests fail, so the final status reports every failure.
+        /// </summary>
+        internal static void FinishAsyncRun(JObject status)
+        {
+            var request = ReadRequest();
+            if (request != null && request.allModes && request.mode == TestMode.EditMode.ToString()
+                && (string)status["status"] == "completed")
+            {
+                File.WriteAllText(TestPartialFile, status.ToString(Formatting.None));
+                request.mode = TestMode.PlayMode.ToString();
+                request.runId = null;
+                File.WriteAllText(TestRequestFile, JsonConvert.SerializeObject(request));
+                // Started on the next editor update, outside the finished run's callbacks.
+                EditorApplication.delayCall += () =>
+                {
+                    // test cancel, or a newer run, may have ended this one in the meantime.
+                    var current = ReadRequest();
+                    if (current == null || !current.allModes || current.mode != TestMode.PlayMode.ToString()
+                        || current.runId != null || File.Exists(TestStatusFile))
+                        return;
+                    StartAsyncTestExecution(TestMode.PlayMode, current.filter, current.filterType, current.includeExplicit);
+                };
+                return;
+            }
+
+            WriteStatusFile(MergeWithPartial(status));
+            DeletePartialFile();
+            CleanupRequestFile();
+        }
+
+        /// <summary>
+        /// <paramref name="status"/> with an 'all' run's EditMode results, if any, put in front: the
+        /// summaries and durations add up and the results are concatenated. An error stays an error.
+        /// </summary>
+        internal static JObject MergeWithPartial(JObject status)
+        {
+            JObject partial;
+            try
+            {
+                if (!File.Exists(TestPartialFile))
+                    return status;
+                partial = JObject.Parse(File.ReadAllText(TestPartialFile));
+            }
+            catch (Exception ex) when (ex is IOException || ex is JsonException)
+            {
+                Debug.LogWarning($"[PipelineTestRunner] Failed to read the EditMode results: {ex.Message}");
+                return status;
+            }
+
+            if ((string)status["status"] != "completed")
+                return status;
+
+            var summary = new JObject();
+            foreach (var key in new[] { "total", "passed", "failed", "skipped", "inconclusive" })
+                summary[key] = ((int?)partial["summary"]?[key] ?? 0) + ((int?)status["summary"]?[key] ?? 0);
+
+            var results = new JArray();
+            foreach (var r in (partial["results"] as JArray ?? new JArray()).Concat(status["results"] as JArray ?? new JArray()))
+                results.Add(r);
+
+            return new JObject
+            {
+                ["status"] = "completed",
+                ["duration"] = Math.Round(((double?)partial["duration"] ?? 0) + ((double?)status["duration"] ?? 0), 2),
+                ["summary"] = summary,
+                ["results"] = results
+            };
+        }
+
+        private static void DeletePartialFile()
+        {
+            try { if (File.Exists(TestPartialFile)) File.Delete(TestPartialFile); } catch { }
         }
 
         private static void WriteStatusFile(object data)
@@ -770,6 +859,7 @@ namespace Unity.Pipeline.Editor.Testing
 
         private static void CleanupRequestFile()
         {
+            s_ActiveRunId = null; // The run is over; keep the in-memory id in step with the file.
             try { if (File.Exists(TestRequestFile)) File.Delete(TestRequestFile); } catch { }
         }
 
@@ -790,10 +880,10 @@ namespace Unity.Pipeline.Editor.Testing
         /// Cancel running tests
         /// </summary>
         /// <returns>A status payload confirming cancellation (or that there was nothing to cancel).</returns>
-        public static object CancelTests()
+        public static CancelTestsResult CancelTests()
         {
             if (m_ActiveCollector == null && !File.Exists(TestRequestFile) && !File.Exists(TestStatusFile))
-                return new { status = "no_tests", message = "No test run in progress." };
+                return new CancelTestsResult("no_tests", "No test run in progress.");
 
             bool wasPlayMode = false;
             try
@@ -809,6 +899,7 @@ namespace Unity.Pipeline.Editor.Testing
             InvalidatePreviousRun();
             WriteStatusFile(new { status = "cancelled", message = "Test run cancelled." });
             CleanupRequestFile();
+            DeletePartialFile();
 
             if (wasPlayMode && EditorApplication.isPlaying)
             {
@@ -817,7 +908,20 @@ namespace Unity.Pipeline.Editor.Testing
             }
 
             Debug.Log("[PipelineTestRunner] Test run cancelled");
-            return new { status = "cancelled", message = "Test run cancelled." };
+            return new CancelTestsResult("cancelled", "Test run cancelled.");
+        }
+
+        /// <summary>What <see cref="CancelTests"/> did: <c>cancelled</c>, or <c>no_tests</c> when nothing was running.</summary>
+        internal readonly struct CancelTestsResult
+        {
+            [JsonProperty("status")] public readonly string Status;
+            [JsonProperty("message")] public readonly string Message;
+
+            public CancelTestsResult(string status, string message)
+            {
+                Status = status;
+                Message = message;
+            }
         }
 
         #endregion
@@ -830,6 +934,10 @@ namespace Unity.Pipeline.Editor.Testing
             public string mode;
             public bool includeExplicit;
             public bool isSync;
+            /// <summary>An 'all' run: after its EditMode half, <see cref="mode"/> moves on to PlayMode.</summary>
+            public bool allModes;
+            /// <summary>The Test Framework's id for the run (TestRunnerApi.Execute), for cancelling it.</summary>
+            public string runId;
         }
     }
 }

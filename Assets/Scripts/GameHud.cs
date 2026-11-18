@@ -471,7 +471,7 @@ namespace TurnTheOrientation
             text.color = color;
             text.alignment = alignment;
             text.textWrappingMode = TextWrappingModes.Normal;
-            text.overflowMode = TextOverflowModes.Ellipsis;
+            text.overflowMode = TextOverflowModes.Overflow;
             text.raycastTarget = false;
             text.fontStyle = FontStyles.Bold;
             return text;

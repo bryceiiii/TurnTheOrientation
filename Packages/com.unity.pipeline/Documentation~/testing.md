@@ -6,7 +6,7 @@ How the package's tests exercise commands. There are two complementary styles �
 
 ### ViaClient — exercise the full HTTP path
 
-Spin up an isolated `PipelineTestServer` and call `server.Execute(command, params)`. This goes over HTTP through the same routing, parameter coercion, and threading the real server uses — it tests the command *as a client sees it*.
+Spin up an isolated `PipelineTestServer` and call `server.Execute(command, params)`, naming the command through the `CommandNames` constants (`CommandNames.GameobjectSetTransform` names the `gameobject set_transform` command). This goes over HTTP through the same routing, parameter coercion, and threading the real server uses — it tests the command *as a client sees it*.
 
 ```csharp
 [Test]
@@ -16,7 +16,7 @@ public void SetTransform_ViaClient_ArrayParams_Apply()
 
     using (var server = new PipelineTestServer())
     {
-        var response = server.Execute("set_transform", new
+        var response = server.Execute(CommandNames.GameobjectSetTransform, new
         {
             target   = new { instanceId = PipelineUtils.GetObjectId(go) },
             position = new[] { 1f, 2f, 3f },
@@ -24,7 +24,7 @@ public void SetTransform_ViaClient_ArrayParams_Apply()
             scale    = new[] { 2f, 2f, 2f }
         });
 
-        Assert.IsTrue(response.IsSuccess, $"set_transform should succeed: {response.Error}");
+        Assert.IsTrue(response.IsSuccess, $"{CommandNames.GameobjectSetTransform} should succeed: {response.Error}");
         Assert.AreEqual(new Vector3(1, 2, 3), go.transform.localPosition);
     }
 }
@@ -34,7 +34,7 @@ The test server is isolated: it uses the **test editor port range `7850`–`7899
 
 ### CommandDirect — call the static method directly
 
-Call the command's static method with typed arguments. This is synchronous, with **no server, HTTP, or dispatcher** involved — fast and ideal for unit-testing command logic and parameter handling.
+Call the command's static method with typed arguments through `CommandRun`, which passes it a `CommandContext` and keeps what it writes. This is synchronous, with **no server, HTTP, or dispatcher** involved — fast and ideal for unit-testing command logic and parameter handling.
 
 ```csharp
 [Test]
@@ -42,15 +42,18 @@ public void SetTransform_Direct_TypedArrays_Apply()
 {
     var go = Track(new GameObject("Xform219_Direct"));
 
-    GameObjectCommands.SetTransform(RefTo(go),
+    var run = CommandRun.Of(cmd => GameObjectCommands.SetTransform(cmd, RefTo(go),
         position: new[] { 1f, 2f, 3f },
         rotation: new[] { 0f, 90f, 0f },
-        scale:    new[] { 2f, 2f, 2f });
+        scale:    new[] { 2f, 2f, 2f }));
 
+    Assert.AreEqual(ExitCode.Success, run.Code, run.Log);
     Assert.AreEqual(new Vector3(1, 2, 3), go.transform.localPosition);
     Assert.AreEqual(new Vector3(2, 2, 2), go.transform.localScale);
 }
 ```
+
+A `CommandRun` has the command's `Code`, its single result (`Result<T>()`, or `ResultJson` for an anonymous type), its `Records` (`RecordsAs<T>()`), what it wrote to `Output`, and its `Log`, with the `Errors` and `Warnings` in it. `CommandRun.OfAsync` awaits a command that returns `Task<ExitCode>`.
 
 Use **CommandDirect** to verify a command's behavior with strongly-typed inputs; use **ViaClient** to additionally verify wire-level concerns (JSON coercion, required-parameter validation, threading).
 
@@ -58,10 +61,11 @@ Use **CommandDirect** to verify a command's behavior with strongly-typed inputs;
 
 | Helper | Role |
 |--------|------|
-| `PipelineTestServer` | Disposable wrapper that starts an isolated `TestEditorPipelineServer`, wires up a `PipelineClient`, and exposes `Execute(command, parameters, timeoutMs = 30000)`. Pumps the server dispatcher during each call to avoid main-thread deadlock. |
-| `TestEditorPipelineServer` | `EditorPipelineServer` subclass for tests. Overrides `WritesDescriptor => false`, `GetPortRange() => (7850, 7899)`, and `GetToken()` (from `SecurityTokenManager`) so it is fully isolated from the live server. |
+| `PipelineTestServer` | Disposable wrapper that starts an isolated `TestEditorPipelineServer`, wires up a `PipelineClient`, and exposes `Execute(command, parameters, timeout = null, requestTimeout = null)` (both `TimeSpan?`; `timeout` defaults to 30 s); `requestTimeout` is sent as the request's `timeout`. Pumps the server dispatcher during each call to avoid main-thread deadlock. |
+| `TestEditorPipelineServer` | `EditorPipelineServer` subclass for tests. Overrides `AdvertisesEndpoint => false`, `GetPortRange() => (7850, 7899)`, and `GetToken()` (from `SecurityTokenManager`) so it is fully isolated from the live server. |
 | `PipelineClient` | Test-side HTTP client. Constructed from a URL+token or a server/manager instance. Key methods: `ExecuteCommandAsync` (`/api/exec`), `GetStatusAsync` (`/api/status`), `PostJsonAsync`. Returns a `PipelineResponse` (`IsSuccess`, `StatusCode`, `Error`, `JsonResponse`, `IsCommandSuccess`). |
-| `EditorTestUtilities` | Async helpers for editor state, e.g. `WaitFor(Func<bool> condition, timeoutMs)` to poll a condition without busy-waiting. |
+| `CommandRun` | Calls a command method with a `CommandContext` and keeps its exit code, result or records, output and log. `Of` for a command that returns `ExitCode`, `OfAsync` for `Task<ExitCode>`. |
+| `EditorTestUtilities` | Async helpers for editor state, e.g. `WaitFor(Func<bool> condition, TimeSpan? timeout = null)` to poll a condition without busy-waiting. |
 | `LiveServerGuard` | Assembly-level `ITestAction` that asserts the **live editor server survives the test run**. |
 
 ### `PipelineTestServer` setup
@@ -71,7 +75,7 @@ public PipelineTestServer()
 {
     m_Server = new TestEditorPipelineServer();
     m_Server.Start(); // auto-assigns a port in 7850-7899; writes no descriptor
-    m_Client = new PipelineClient($"http://localhost:{m_Server.Port}", SecurityTokenManager.GetOrCreateToken());
+    m_Client = new PipelineClient($"http://127.0.0.1:{m_Server.Port}", SecurityTokenManager.GetOrCreateToken());
 }
 ```
 

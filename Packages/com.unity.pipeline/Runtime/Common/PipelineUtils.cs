@@ -2,9 +2,6 @@ using System.Collections.Generic;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
-#if UNITY_6000_3_OR_NEWER
-using UnityEngine.Assemblies;
-#endif
 
 namespace Unity.Pipeline
 {
@@ -18,7 +15,7 @@ namespace Unity.Pipeline
     /// here. It (de)serializes as a single JSON integer (the raw ulong on 6000.4+, the int below).
     /// </summary>
     [JsonConverter(typeof(ObjectIdConverter))]
-    public readonly struct ObjectId : System.IEquatable<ObjectId>
+    internal readonly struct ObjectId : System.IEquatable<ObjectId>
     {
 #if UNITY_6000_4_OR_NEWER
         readonly EntityId m_Value;
@@ -163,7 +160,7 @@ namespace Unity.Pipeline
 #endif
         }
 
-        /// <summary>Load a compiled assembly from raw bytes (used by the hot-reload/eval compilers).</summary>
+        /// <summary>Load a compiled assembly from raw bytes (used by the method-reload/eval compilers).</summary>
         /// <param name="bytes">The assembly image.</param>
         /// <param name="pdb">The matching portable PDB, if any.</param>
         /// <returns>The loaded assembly.</returns>
@@ -193,7 +190,7 @@ namespace Unity.Pipeline
         public static IReadOnlyList<System.Reflection.Assembly> GetLoadedAssemblies()
         {
 #if UNITY_6000_5_OR_NEWER
-            return CurrentAssemblies.GetLoadedAssemblies();
+            return UnityEngine.Assemblies.CurrentAssemblies.GetLoadedAssemblies();
 #else
             return System.AppDomain.CurrentDomain.GetAssemblies();
 #endif
@@ -202,7 +199,7 @@ namespace Unity.Pipeline
         /// <summary>The object's id as a version-stable <see cref="ObjectId"/> (EntityId on 6000.4+, int below).</summary>
         /// <param name="obj">The object to get an id for.</param>
         /// <returns>The object's version-stable id.</returns>
-        public static ObjectId GetObjectId(Object obj)
+        internal static ObjectId GetObjectId(Object obj)
         {
 #if UNITY_6000_4_OR_NEWER
             return new ObjectId(obj.GetEntityId());
@@ -213,7 +210,7 @@ namespace Unity.Pipeline
 
 #if UNITY_EDITOR
         /// <summary>Resolve a loaded/scene object from its <see cref="ObjectId"/>, or null if not found.</summary>
-        public static Object IdToObject(ObjectId id)
+        internal static Object IdToObject(ObjectId id)
         {
 #if UNITY_6000_4_OR_NEWER
             return UnityEditor.EditorUtility.EntityIdToObject(id);

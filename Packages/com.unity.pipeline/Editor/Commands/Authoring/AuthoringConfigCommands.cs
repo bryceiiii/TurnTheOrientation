@@ -10,20 +10,24 @@ namespace Unity.Pipeline.Editor.Commands.Authoring
     /// </summary>
     static class AuthoringConfigCommands
     {
-        [CliCommand("get_authoring_root", "Get the base folder (under Assets/) that bare authoring paths resolve against.", Tags = new[] { "authoring" })]
-        public static object GetAuthoringRoot()
+        const string Group = "authoring";
+
+        [CliGroupCommand(Group, "Get the base folder (under Assets/) that bare authoring paths resolve against.", Tags = new[] { "authoring" }, Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode GetRoot(CommandContext cmd)
         {
-            return new { root = ProjectPaths.AuthoringRoot };
+            cmd.Result.Write(new { root = ProjectPaths.AuthoringRoot });
+            return ExitCode.Success;
         }
 
-        [CliCommand("set_authoring_root", "Set the base folder (under Assets/) that bare authoring paths resolve against and are confined to. Use 'Assets' for full project access.", Tags = new[] { "authoring" })]
-        public static object SetAuthoringRoot(
+        [CliGroupCommand(Group, "Set the base folder (under Assets/) that bare authoring paths resolve against and are confined to. Use 'Assets' for full project access.", Tags = new[] { "authoring" }, Effect = CommandEffect.Idempotent)]
+        internal static ExitCode SetRoot(CommandContext cmd,
             [CliArg("root", "Project-relative folder under Assets/, e.g. Assets/AgentWork. Use 'Assets' to allow the whole project.", Required = true)] string root)
         {
             // Throws ArgumentException for invalid roots (outside Assets/ or containing ".."); the
-            // server surfaces that message to the caller.
+            // pipeline logs that message and exits InvalidUsage.
             ProjectPaths.AuthoringRoot = root;
-            return new { root = ProjectPaths.AuthoringRoot };
+            cmd.Result.Write(new { root = ProjectPaths.AuthoringRoot });
+            return ExitCode.Success;
         }
     }
 }

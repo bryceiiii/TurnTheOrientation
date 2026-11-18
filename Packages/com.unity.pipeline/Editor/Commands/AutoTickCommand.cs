@@ -27,6 +27,8 @@ namespace Unity.Pipeline.Editor.Commands
 #endif
     static class AutoTickCommand
     {
+        const string Group = "editor";
+
         // Default interval when nothing else applies (fresh editor session, no prior SetAutoTick call).
         internal const int DefaultIntervalMs = 16;
 
@@ -43,26 +45,45 @@ namespace Unity.Pipeline.Editor.Commands
         internal static bool IsEnabled => s_Enabled;
         internal static long CurrentIntervalMs => s_IntervalMs;
 
-        [CliCommand("set_autotick", "Keep the editor ticking while unfocused by forcing EditorApplication.SignalTick at a throttled rate", MainThreadRequired = true, Tags = new[] { "editor" })]
-        public static string SetAutoTick(
-            [CliArg("enable", "Enable (true) or disable (false) auto-tick mode")] bool enable = true,
-            [CliArg("interval_ms", "Minimum milliseconds between forced ticks. 0 = every update (max rate, pegs a CPU core). Default 16 (~60Hz).")] int intervalMs = DefaultIntervalMs,
-            [CliArg("persist", "Persist this choice to SessionState so it survives a domain reload. Set false for a one-off/expensive setting (e.g. interval_ms=0) that should revert to the last persisted choice (or the default) after the next recompile instead of sticking for the rest of the session.")] bool persist = true)
+        [CliGroupCommand(Group, "Keep the editor ticking while unfocused by forcing EditorApplication.SignalTick at a throttled rate", MainThreadRequired = true, Tags = new[] { "editor" }, Effect = CommandEffect.Idempotent)]
+        internal static ExitCode SetAutoTick(CommandContext cmd,
+            [CliArg("enabled", "Turn auto-tick mode on (true) or off (false)")] bool enabled = true,
+            [CliArg("interval-ms", "Minimum milliseconds between forced ticks. 0 = every update (max rate, pegs a CPU core). Default 16 (~60Hz).")] int intervalMs = DefaultIntervalMs,
+            [CliArg("persist", "Persist this choice to SessionState so it survives a domain reload. Set false for a one-off/expensive setting (e.g. interval-ms=0) that should revert to the last persisted choice (or the default) after the next recompile instead of sticking for the rest of the session.")] bool persist = true)
         {
-            var result = ApplyAutoTick(enable, intervalMs);
-            if (!persist)
-                return result.StartsWith("Error:") ? result : result + " (session-only, won't survive a domain reload)";
+            if (!Set(enabled, intervalMs, persist, out var message))
+            {
+                cmd.Log.Error(message);
+                return ExitCode.Failed;
+            }
 
-            if (result.StartsWith("Error:"))
-                return result;
-
-            SessionState.SetBool(EnabledKey, s_Enabled);
-            SessionState.SetInt(IntervalKey, (int)s_IntervalMs);
-            return result;
+            cmd.Log.Info(message);
+            cmd.Result.Write(new { enabled = s_Enabled, intervalMs = s_IntervalMs, persisted = persist });
+            return ExitCode.Success;
         }
 
         /// <summary>
-        /// Restore auto-tick to whatever the user last explicitly set via <see cref="SetAutoTick"/>
+        /// Turns auto-tick on or off and, with <paramref name="persist"/>, stores the choice in
+        /// SessionState. <paramref name="message"/> says what changed, or why it failed.
+        /// </summary>
+        internal static bool Set(bool enabled, int intervalMs, bool persist, out string message)
+        {
+            if (!ApplyAutoTick(enabled, intervalMs, out message))
+                return false;
+
+            if (!persist)
+            {
+                message += " (session-only, won't survive a domain reload)";
+                return true;
+            }
+
+            SessionState.SetBool(EnabledKey, s_Enabled);
+            SessionState.SetInt(IntervalKey, (int)s_IntervalMs);
+            return true;
+        }
+
+        /// <summary>
+        /// Restore auto-tick to whatever the user last explicitly set via <see cref="Set"/>
         /// this editor session (surviving the domain reload that just wiped the statics). If nothing
         /// was ever explicitly set this session, apply <paramref name="defaultEnabled"/> at
         /// <see cref="DefaultIntervalMs"/> instead — this is the only case where the watchdog's
@@ -73,12 +94,12 @@ namespace Unity.Pipeline.Editor.Commands
             var storedInterval = SessionState.GetInt(IntervalKey, -1);
             if (storedInterval < 0)
             {
-                ApplyAutoTick(defaultEnabled, DefaultIntervalMs);
+                ApplyAutoTick(defaultEnabled, DefaultIntervalMs, out _);
                 return;
             }
 
             var storedEnabled = SessionState.GetBool(EnabledKey, defaultEnabled);
-            ApplyAutoTick(storedEnabled, storedInterval);
+            ApplyAutoTick(storedEnabled, storedInterval, out _);
         }
 
         /// <summary>
@@ -135,15 +156,19 @@ namespace Unity.Pipeline.Editor.Commands
             SessionState.SetInt(IntervalKey, (int)intervalMs);
         }
 
-        private static string ApplyAutoTick(bool enable, int intervalMs)
+        private static bool ApplyAutoTick(bool enable, int intervalMs, out string message)
         {
             if (enable && s_Enabled)
             {
                 s_IntervalMs = Math.Max(0, intervalMs);
-                return $"Auto-tick already enabled (interval updated to {s_IntervalMs}ms)";
+                message = $"Auto-tick already enabled (interval updated to {s_IntervalMs}ms)";
+                return true;
             }
             if (!enable && !s_Enabled)
-                return "Auto-tick already disabled";
+            {
+                message = "Auto-tick already disabled";
+                return true;
+            }
 
             if (enable)
             {
@@ -154,7 +179,10 @@ namespace Unity.Pipeline.Editor.Commands
                         BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
 
                     if (method == null)
-                        return "Error: EditorApplication.SignalTick not found (internal API may have changed)";
+                    {
+                        message = "EditorApplication.SignalTick not found (internal API may have changed)";
+                        return false;
+                    }
 
                     try
                     {
@@ -162,7 +190,8 @@ namespace Unity.Pipeline.Editor.Commands
                     }
                     catch (Exception ex)
                     {
-                        return $"Error: could not bind EditorApplication.SignalTick: {ex.Message}";
+                        message = $"Could not bind EditorApplication.SignalTick: {ex.Message}";
+                        return false;
                     }
                 }
 
@@ -178,7 +207,8 @@ namespace Unity.Pipeline.Editor.Commands
                 };
                 EditorApplication.update += s_Pump;
                 s_Enabled = true;
-                return $"Auto-tick enabled (interval {s_IntervalMs}ms)";
+                message = $"Auto-tick enabled (interval {s_IntervalMs}ms)";
+                return true;
             }
 
             if (s_Pump != null)
@@ -188,7 +218,8 @@ namespace Unity.Pipeline.Editor.Commands
             }
             s_Stopwatch.Stop();
             s_Enabled = false;
-            return "Auto-tick disabled";
+            message = "Auto-tick disabled";
+            return true;
         }
     }
 }

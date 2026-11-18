@@ -28,9 +28,13 @@ namespace Unity.Pipeline.Editor.Testing
         // For sync mode
         private TaskCompletionSource<ITestResultAdaptor> m_CompletionSource;
 
+        private readonly bool m_AttachedMidRun;
+
         /// <summary>Create a collector ready to receive callbacks for a new run.</summary>
-        public TestResultCollector()
+        /// <param name="attachedMidRun">True when the run started before this collector was registered.</param>
+        public TestResultCollector(bool attachedMidRun = false)
         {
+            m_AttachedMidRun = attachedMidRun;
             m_CompletionSource = new TaskCompletionSource<ITestResultAdaptor>();
         }
 
@@ -93,12 +97,12 @@ namespace Unity.Pipeline.Editor.Testing
             RootResult = result;
             IsComplete = true;
 
-            // If we attached after the tests already ran (PlayMode re-registers a fresh collector
-            // after each play-mode domain reload, so the incremental TestFinished callbacks were
-            // delivered to a collector from a previous domain), rebuild from the authoritative
+            // A collector attached mid-run (re-registered after a domain reload) missed the
+            // TestFinished callbacks delivered before it attached, so rebuild from the authoritative
             // result tree. The normal in-domain path leaves Results already populated.
-            if (Results.Count == 0)
+            if (m_AttachedMidRun || Results.Count == 0)
             {
+                Results.Clear();
                 CollectLeafResults(result);
             }
 

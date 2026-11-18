@@ -12,22 +12,23 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
     /// </summary>
     static class TagsLayersCommands
     {
-        const string Group = "tags_layers";
+        const string Domain = "tags_layers";
+        const string Group = "settings." + Domain;
         const string TagManagerPath = "ProjectSettings/TagManager.asset";
         const int FirstUserLayer = 8;
         const int LastUserLayer = 31;
 
-        [CliCommand("get_tags_layers", "Read the project's tags and (named) layers.", MainThreadRequired = true, Tags = new[] { "settings/tags_layers" })]
-        public static ProjectSettingsResponse Get() => ProjectSettingsCommand.Get(Group, Read);
+        [CliGroupCommand(Group, "Read the project's tags and (named) layers.", MainThreadRequired = true, Tags = new[] { "settings/tags_layers" }, Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode Get(CommandContext cmd) => ProjectSettingsCommand.Get(cmd, Domain, Read);
 
-        [CliCommand("set_tags_layers", "Add/remove tags and assign user layer names (index 8-31). Requires confirm=true; use dry_run to preview. Not undoable via Ctrl+Z.", MainThreadRequired = true, Tags = new[] { "settings/tags_layers" })]
-        public static ProjectSettingsResponse Set(
+        [CliGroupCommand(Group, "Add/remove tags and assign user layer names (index 8-31). Requires confirm=true; use dry-run to preview. Not undoable via Ctrl+Z.", MainThreadRequired = true, Tags = new[] { "settings/tags_layers" }, Effect = CommandEffect.Destructive)]
+        internal static ExitCode Set(CommandContext cmd,
             [CliArg("settings", "Tag/layer changes to make.")] TagsLayersInput settings = null,
             [CliArg("confirm", "Apply the change. Without it the call is refused.")] bool confirm = false,
-            [CliArg("dry_run", "Preview the change without applying it.")] bool dryRun = false)
+            [CliArg("dry-run", "Preview the change without applying it.")] bool dryRun = false)
         {
             if (settings == null)
-                return ProjectSettingsResponse.Fail(Group, "No 'settings' object provided.");
+                return ProjectSettingsCommand.Fail(cmd, ExitCode.InvalidUsage, "No 'settings' object provided.");
 
             if (settings.SetLayers != null)
             {
@@ -36,7 +37,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
                     if (layer == null)
                         continue;
                     if (layer.Index < FirstUserLayer || layer.Index > LastUserLayer)
-                        return ProjectSettingsResponse.Fail(Group,
+                        return ProjectSettingsCommand.Fail(cmd, ExitCode.InvalidUsage,
                             $"layer index {layer.Index} is reserved or out of range; user layers are {FirstUserLayer}..{LastUserLayer}.");
                 }
             }
@@ -68,7 +69,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
                     }
 
             if (changes.Count == 0)
-                return NoChanges();
+                return ProjectSettingsCommand.NoChanges(cmd, Domain, Read);
 
             var planText = "Set tags/layers: " + string.Join("; ", changes);
 
@@ -101,14 +102,7 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
                 AssetDatabase.SaveAssets();
             }
 
-            return ProjectSettingsCommand.Apply(Group, confirm, dryRun, settings, () => planText, Apply, Read);
-        }
-
-        static ProjectSettingsResponse NoChanges()
-        {
-            var response = ProjectSettingsCommand.Get(Group, Read);
-            response.Message = "No changes specified; nothing to apply.";
-            return response;
+            return ProjectSettingsCommand.Apply(cmd, Domain, confirm, dryRun, settings, () => planText, Apply, Read);
         }
 
         static Dictionary<string, object> Read() => new Dictionary<string, object>
@@ -121,13 +115,13 @@ namespace Unity.Pipeline.Editor.Commands.ProjectSettings
     /// <summary>Tag/layer changes. All fields optional; omitted ones make no change.</summary>
     class TagsLayersInput : IStructuredCommandInput
     {
-        [CliArg("addTags", "Tag names to add.")]
+        [CliArg("add-tags", "Tag names to add.")]
         public string[] AddTags { get; set; }
 
-        [CliArg("removeTags", "Tag names to remove.")]
+        [CliArg("remove-tags", "Tag names to remove.")]
         public string[] RemoveTags { get; set; }
 
-        [CliArg("setLayers", "User layer assignments (index 8-31).")]
+        [CliArg("set-layers", "User layer assignments (index 8-31).")]
         public LayerAssignment[] SetLayers { get; set; }
     }
 

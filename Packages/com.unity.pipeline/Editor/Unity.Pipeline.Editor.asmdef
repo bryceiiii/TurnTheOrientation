@@ -3,8 +3,10 @@
     "rootNamespace": "Unity.Pipeline.Editor",
     "references": [
         "Unity.Pipeline",
+        "Unity.Pipeline.Attributes",
         "Unity.Pipeline.IlInterpreter",
-        "Unity.Nuget.Newtonsoft-Json"
+        "Unity.Nuget.Newtonsoft-Json",
+        "Unity.Pipeline.ScenePreview"
     ],
     "includePlatforms": [
         "Editor"
@@ -15,6 +17,12 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.multiplayer.playmode",
+            "expression": "",
+            "define": "MPPM_AVAILABLE"
+        }
+    ],
     "noEngineReferences": false
 }

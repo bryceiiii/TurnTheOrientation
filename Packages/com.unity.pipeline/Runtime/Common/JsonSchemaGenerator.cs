@@ -34,7 +34,7 @@ namespace Unity.Pipeline.Commands
             {
                 ["$schema"] = "http://json-schema.org/draft-07/schema#",
                 ["type"] = "object",
-                ["title"] = command.Name,
+                ["title"] = command.FullName,
                 ["description"] = command.Description,
                 ["properties"] = GenerateParameterProperties(command.Parameters),
                 ["required"] = new JArray(command.Parameters.Where(p => p.Required).Select(p => p.Name)),
@@ -224,7 +224,7 @@ namespace Unity.Pipeline.Commands
         /// element type. <c>string</c> is intentionally excluded (it is <see cref="IEnumerable{T}"/>
         /// of char but maps to a JSON string).
         /// </summary>
-        private static bool TryGetEnumerableElementType(Type type, out Type elementType)
+        internal static bool TryGetEnumerableElementType(Type type, out Type elementType)
         {
             elementType = null;
 

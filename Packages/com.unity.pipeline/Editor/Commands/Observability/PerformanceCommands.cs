@@ -111,10 +111,12 @@ namespace Unity.Pipeline.Editor.Commands.Observability
     /// </summary>
     static class PerformanceCommands
     {
-        [CliCommand("get_performance_stats", "Read render, memory, and frame-timing stats (structured, read-only).", Tags = new[] { "observability/performance" })]
-        public static PerformanceStats GetPerformanceStats()
+        const string Group = "diagnostics";
+
+        [CliGroupCommand(Group, "Read render, memory, and frame-timing stats (structured, read-only).", Tags = new[] { "observability/performance" }, Effect = CommandEffect.ReadOnly)]
+        internal static ExitCode GetPerformance(CommandContext cmd)
         {
-            return new PerformanceStats
+            cmd.Result.Write(new PerformanceStats
             {
                 Render = new RenderStats
                 {
@@ -133,7 +135,8 @@ namespace Unity.Pipeline.Editor.Commands.Observability
                     MonoHeapBytes = Profiler.GetMonoHeapSizeLong()
                 },
                 FrameTiming = CaptureFrameTiming()
-            };
+            });
+            return ExitCode.Success;
         }
 
         /// <summary>

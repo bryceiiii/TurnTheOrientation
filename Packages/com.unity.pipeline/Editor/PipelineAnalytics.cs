@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
 using Unity.Pipeline.Commands;
 using Unity.Pipeline.Telemetry;
 using UnityEditor;
@@ -48,14 +48,7 @@ namespace Unity.Pipeline.Editor
         private const string SessionStartTicksKey = "Unity.Pipeline.Analytics.SessionStartTicks";
 
         /// <summary>
-        /// Assemblies whose commands ship with the package. Anything else carrying [CliCommand] was
-        /// written by the project, which is what isUserDefinedCommand reports.
-        /// </summary>
-        private static readonly HashSet<string> PackageAssemblies =
-            new HashSet<string> { "Unity.Pipeline", "Unity.Pipeline.Editor" };
-
-        /// <summary>
-        /// The tag every code-evaluation command carries (eval, eval_file, run_script). Matching the
+        /// The tag every code-evaluation command carries (script eval, script run). Matching the
         /// tag rather than a name list covers a new eval command the moment it is tagged, and the
         /// suite already enforces that shipped commands carry well-formed tags.
         /// </summary>
@@ -75,6 +68,84 @@ namespace Unity.Pipeline.Editor
         /// The send call, indirected so tests can capture events instead of shipping them.
         /// </summary>
         internal static Action<IAnalytic> s_Send = analytic => EditorAnalytics.SendAnalytic(analytic);
+
+        private const int RecentEventCapacity = 5;
+        private static readonly Queue<SentEvent> s_RecentEvents = new Queue<SentEvent>();
+
+        /// <summary>
+        /// Whether sent events are kept for <see cref="RecentEvents"/>. Off until a client starts
+        /// recording; a domain reload turns it off again.
+        /// </summary>
+        internal static bool IsRecording { get; set; }
+
+        /// <summary>
+        /// Whether evals record what <c>Pipeline_CommandExecuted</c> reports about them: while the
+        /// user's Editor analytics are on, or while recording.
+        /// </summary>
+        internal static bool CollectsEvalDetails() => EditorAnalytics.enabled || IsRecording;
+
+        [InitializeOnLoadMethod]
+        static void CollectEvalDetailsWithAnalytics() => EvalAnalyticsDetails.IsCollecting = CollectsEvalDetails;
+
+        /// <summary>
+        /// The last events the reporter handed to Unity's analytics while recording, newest last,
+        /// whether or not the user's analytics settings then let them through. Held in memory, so a
+        /// domain reload empties it.
+        /// </summary>
+        internal static IReadOnlyList<SentEvent> RecentEvents
+        {
+            get
+            {
+                lock (s_RecentEvents)
+                    return s_RecentEvents.ToArray();
+            }
+        }
+
+        /// <summary>One event the reporter sent: its name, when, and its payload.</summary>
+        internal sealed class SentEvent
+        {
+            public SentEvent(string eventName, IAnalytic.IData data)
+            {
+                EventName = eventName;
+                Time = DateTime.UtcNow.ToString("o");
+                Data = data;
+            }
+
+            [JsonProperty("eventName")]
+            public string EventName { get; }
+
+            [JsonProperty("time")]
+            public string Time { get; }
+
+            [JsonProperty("data")]
+            public IAnalytic.IData Data { get; }
+        }
+
+        internal static void ClearRecentEvents()
+        {
+            lock (s_RecentEvents)
+                s_RecentEvents.Clear();
+        }
+
+        internal static void Send(string eventName, IAnalytic analytic)
+        {
+            try
+            {
+                if (IsRecording && analytic.TryGatherData(out var data, out _))
+                {
+                    lock (s_RecentEvents)
+                    {
+                        s_RecentEvents.Enqueue(new SentEvent(eventName, data));
+                        while (s_RecentEvents.Count > RecentEventCapacity)
+                            s_RecentEvents.Dequeue();
+                    }
+                }
+            }
+            finally
+            {
+                s_Send(analytic);
+            }
+        }
 
         /// <summary>
         /// The session latch as stored in SessionState: whether the start event has been sent this
@@ -112,17 +183,28 @@ namespace Unity.Pipeline.Editor
 
                 var command = info.Command;
                 var userDefined = IsUserDefinedCommand(command.Package);
-                s_Send(new CommandExecutedAnalytic(new CommandExecutedData
+                var isEval = IsEvalCommand(command.Tags);
+                var evalDetails = isEval ? info.EvalDetails : null;
+                Send(CommandExecutedEventName, new CommandExecutedAnalytic(new CommandExecutedData
                 {
                     // Only a command that shipped with the package describes itself; a
                     // project-declared one reports the placeholder and no tags.
-                    commandName = userDefined ? RedactedCommandName : command.Name,
+                    commandName = userDefined ? RedactedCommandName : command.FullName,
                     commandTags = userDefined ? Array.Empty<string>() : ToArray(command.Tags),
                     commandSuccess = info.Success,
                     commandDuration = info.DurationMs,
                     isUserDefinedCommand = userDefined,
-                    isEval = IsEvalCommand(command.Tags),
+                    isEval = isEval,
                     isEvalWithExistingCommandAvailable = EvalCoversAnExistingCommand(command, info.Parameters),
+                    commandId = info.CommandId,
+                    clientSource = info.ClientSource ?? "",
+                    clientName = info.ClientName ?? "",
+                    caller = info.Caller ?? "",
+                    skill = info.Skill ?? "",
+                    failureKind = (isEval ? info.FailureKind : null) ?? "",
+                    unityAPIUsed = ToArray(evalDetails?.UnityApisUsed),
+                    compileErrorCodes = ToArray(evalDetails?.CompileErrorCodes),
+                    exceptionType = evalDetails?.ExceptionType ?? "",
                 }));
             }
             catch (Exception ex)
@@ -150,7 +232,7 @@ namespace Unity.Pipeline.Editor
                     ? Math.Max(0, (DateTime.UtcNow.Ticks - startTicks) / TimeSpan.TicksPerMillisecond)
                     : 0;
 
-                s_Send(new SessionStoppedAnalytic(new SessionStoppedData
+                Send(SessionStoppedEventName, new SessionStoppedAnalytic(new SessionStoppedData
                 {
                     sessionDuration = elapsedMs,
                 }));
@@ -174,15 +256,15 @@ namespace Unity.Pipeline.Editor
             SessionLatch = (true, DateTime.UtcNow.Ticks);
 
             var server = PipelineServerStartup.Server;
-            s_Send(new SessionStartedAnalytic(new SessionStartedData
+            Send(SessionStartedEventName, new SessionStartedAnalytic(new SessionStartedData
             {
                 batchmode = Application.isBatchMode,
-                automated = EditorPipelineServer.DetectAutomatedMode(Environment.GetCommandLineArgs()),
-                // Both fall back to what the server starts with when no settings asset is authored:
+                automated = EditorProcessInfo.IsAutomated(Environment.GetCommandLineArgs()),
+                // Both fall back to what the server starts with when no settings are authored:
                 // browser clients refused, port auto-assigned from the range.
                 browserAllowed = server?.AllowSandboxedBrowserClients ?? false,
                 dynamicPortAssignation = server?.PortAutoAssigned ?? true,
-                hotReloadWatcherEnabled = EditorHotReloadWatcher.IsWatching,
+                hotReloadWatcherEnabled = EditorMethodReloadWatcher.IsWatching,
             }));
         }
 
@@ -193,7 +275,7 @@ namespace Unity.Pipeline.Editor
         /// </summary>
         internal static bool IsUserDefinedCommand(string package)
         {
-            return !string.IsNullOrEmpty(package) && !PackageAssemblies.Contains(package);
+            return !string.IsNullOrEmpty(package) && !CommandRegistry.IsPackageAssembly(package);
         }
 
         /// <summary>
@@ -207,16 +289,16 @@ namespace Unity.Pipeline.Editor
         /// command", not "no command could ever cover this".
         ///
         /// Answerable only where the body is reachable from the parameters: <c>eval</c> passes it
-        /// inline and <c>eval_file</c> names a file to read. <c>run_script</c> runs a project file
-        /// with a named entry point rather than a snippet, and the fingerprinter parses script-kind
-        /// bodies, so it is not fingerprinted and reports false.
+        /// inline or names a file to read. <c>run_script</c> runs a project file with a named entry
+        /// point rather than a snippet, and the fingerprinter parses script-kind bodies, so it is not
+        /// fingerprinted and reports false.
         /// </summary>
-        internal static bool EvalCoversAnExistingCommand(CommandInfo command, JObject parameters)
+        internal static bool EvalCoversAnExistingCommand(CommandInfo command, IReadOnlyDictionary<string, object> parameters)
         {
             if (parameters == null || !IsEvalCommand(command.Tags))
                 return false;
 
-            var code = ReadEvalBody(command.Name, parameters);
+            var code = ReadEvalBody(command.FullName, parameters);
             if (string.IsNullOrWhiteSpace(code))
                 return false;
 
@@ -224,7 +306,7 @@ namespace Unity.Pipeline.Editor
             if (fingerprints == null || fingerprints.Count == 0)
                 return false;
 
-            var available = new HashSet<string>(CommandRegistry.DiscoverCommands().Select(c => c.Name));
+            var available = new HashSet<string>(CommandRegistry.DiscoverCommands().Select(c => c.FullName));
             foreach (var fingerprint in fingerprints)
             {
                 if (EvalCoverageMap.Default.TryGetValue(fingerprint, out var mapped) && available.Contains(mapped))
@@ -238,31 +320,41 @@ namespace Unity.Pipeline.Editor
         /// The evaluated body, from the parameters the command was invoked with. Returns null for a
         /// command whose body is not reachable that way.
         /// </summary>
-        private static string ReadEvalBody(string commandName, JObject parameters)
+        private static string ReadEvalBody(string commandName, IReadOnlyDictionary<string, object> parameters)
         {
             switch (commandName)
             {
-                case "eval":
-                    return parameters["code"]?.ToString();
-
-                case "eval_file":
-                    // The command read this file moments ago; re-reading it costs one small read and
-                    // keeps eval_file from reporting a permanent false that would be indistinguishable
-                    // from a genuine "nothing covers this".
-                    var file = parameters["file"]?.ToString();
-                    if (string.IsNullOrEmpty(file) || !System.IO.File.Exists(file))
-                        return null;
-                    try
-                    {
-                        return System.IO.File.ReadAllText(file);
-                    }
-                    catch
-                    {
-                        return null;
-                    }
+                case CommandNames.ScriptEval:
+                    var code = parameters.TryGetValue("code", out var value) ? value?.ToString() : null;
+                    return string.IsNullOrEmpty(code) ? ReadEvalFile(parameters) : code;
 
                 default:
                     return null;
+            }
+        }
+
+        /// <summary>
+        /// The file an eval named in its <c>file</c> parameter, resolved like the command resolves
+        /// it. The command read this file moments ago; re-reading it costs one small read and keeps
+        /// a file eval from reporting a permanent false that would be indistinguishable from a
+        /// genuine "nothing covers this".
+        /// </summary>
+        private static string ReadEvalFile(IReadOnlyDictionary<string, object> parameters)
+        {
+            var file = parameters.TryGetValue("file", out var value) ? value?.ToString() : null;
+            if (string.IsNullOrEmpty(file))
+                return null;
+
+            var path = System.IO.Path.IsPathRooted(file) ? file : System.IO.Path.Combine(Authoring.ProjectPaths.ProjectRoot, file);
+            if (!System.IO.File.Exists(path))
+                return null;
+            try
+            {
+                return System.IO.File.ReadAllText(path);
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -279,6 +371,9 @@ namespace Unity.Pipeline.Editor
 
         private static string[] ToArray(IReadOnlyList<string> tags)
         {
+            if (tags == null)
+                return Array.Empty<string>();
+
             var array = new string[tags.Count];
             for (var i = 0; i < tags.Count; i++)
                 array[i] = tags[i];
@@ -295,6 +390,7 @@ namespace Unity.Pipeline.Editor
             public bool automated;
             public bool browserAllowed;
             public bool dynamicPortAssignation;
+            // Keeps the registered analytics schema's field name from before the method-reload rename.
             public bool hotReloadWatcherEnabled;
         }
 
@@ -308,6 +404,15 @@ namespace Unity.Pipeline.Editor
             public bool isUserDefinedCommand;
             public bool isEval;
             public bool isEvalWithExistingCommandAvailable;
+            public long commandId;
+            public string clientSource;
+            public string clientName;
+            public string caller;
+            public string skill;
+            public string failureKind;
+            public string[] unityAPIUsed;
+            public string[] compileErrorCodes;
+            public string exceptionType;
         }
 
         [Serializable]
