@@ -25,17 +25,23 @@ the same 2D physics layout, turning vertical walls into platforms.
 
 ## Project Structure
 
-- `Assets/Scripts/TurnGame.cs`: room state, level loading, rotation, and progression
+- `Assets/Scenes/SampleScene.unity`: persistent bootstrap scene and `LevelManager`
+- `Assets/Scenes/Level_01.unity`: First Turn
+- `Assets/Scenes/Level_02.unity`: Two Signals
+- `Assets/Scenes/Level_03.unity`: Cross Current
+- `Assets/Prefabs/Common`: shared player, wall, floor, crate, socket, gate, exit, and prop prefabs
+- `Assets/Scripts/LevelManager.cs`: scene order, next-level loading, and current-level reload
+- `Assets/Scripts/LevelSceneController.cs`: per-scene prefab references and starting layout
+- `Assets/Scripts/TurnGame.cs`: room state, rotation, gravity, plates, and progression
 - `Assets/Scripts/TurnPlayer.cs`: top-down and side-view movement
-- `Assets/Scripts/LevelCatalog.cs`: data for the three rooms
-- `Assets/Scripts/SpriteFactory.cs`: original procedural 2D art
 - `Assets/Scripts/GameHud.cs`: title, HUD, pause, room-clear, and final screens
-- `Assets/Tests/EditMode`: deterministic rules and level-data tests
+- `Assets/Tests/EditMode`: rules, Build Settings, and prefab migration tests
 
-All gameplay art and audio are generated at runtime; no third-party art or
-audio assets are included.
+Level layouts are authored as prefab instances in their own scenes and can be
+adjusted directly in the Unity editor. Gameplay audio is synthesized at runtime.
 
 ## Open In Unity
 
 Open `Assets/Scenes/SampleScene.unity` in Unity `6000.3.10f1` and press Play.
-The scene contains one `GameBootstrap` object that builds the complete demo.
+`LevelManager` on `Turn The Orientation` loads `Level_01` and keeps the camera,
+HUD, audio, and game state alive across level scene changes.

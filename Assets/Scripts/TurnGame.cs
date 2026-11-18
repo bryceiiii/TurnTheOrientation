@@ -21,10 +21,11 @@ namespace TurnTheOrientation
         private Camera _camera;
         private GameAudio _audio;
         private GameHud _hud;
+        private LevelManager _levelManager;
+        private LevelSceneController _levelScene;
         private TurnPlayer _player;
         private DoorGate _gate;
         private ExitPortal _exit;
-        private LevelDefinition _level;
         private Transform _roomRoot;
         private int _viewAngle;
         private int _latchedPlates;
@@ -33,46 +34,97 @@ namespace TurnTheOrientation
         private float _fallGuard;
 
         public GameState State { get; private set; } = GameState.Title;
-        public int CurrentLevelIndex { get; private set; }
-        public int LevelCount => LevelCatalog.All.Count;
+        public int CurrentLevelIndex => _levelManager != null ? _levelManager.CurrentLevelIndex : 0;
+        public int LevelCount => _levelManager != null ? _levelManager.LevelCount : 0;
         public int RoomRotation => _viewAngle;
         public int LatchedPlates => _latchedPlates;
         public int TotalPlates => _plates.Count;
         public int Sparks => _sparks;
         public PuzzleViewMode Mode => ViewMath.ModeForAngle(_viewAngle);
         public string ModeLabel => Mode == PuzzleViewMode.TopDown ? "TOP" : "SIDE";
-        public string LevelTitle => _level != null ? _level.Title : string.Empty;
-        public string LevelHint => _level != null ? _level.Hint : string.Empty;
+        public string LevelTitle => _levelScene != null ? _levelScene.LevelTitle : string.Empty;
+        public string LevelHint => _levelScene != null ? _levelScene.LevelHint : string.Empty;
         public Transform RoomRoot => _roomRoot;
         public GameAudio Audio => _audio;
         public TurnPlayer Player => _player;
-        public bool CanControlPlayer => State == GameState.Playing && !_rotating;
+        public bool HasLevel => _levelScene != null;
+        public bool CanControlPlayer => State == GameState.Playing && !_rotating && HasLevel;
         public bool ExitIsArmed =>
             State == GameState.Playing &&
             Mode == PuzzleViewMode.SideView &&
             !_rotating &&
+            _plates.Count > 0 &&
             _latchedPlates >= _plates.Count;
 
-        public void Initialize(Camera gameCamera, GameAudio audio, GameHud hud)
+        public void Initialize(
+            Camera gameCamera,
+            GameAudio audio,
+            GameHud hud,
+            LevelManager levelManager)
         {
             _camera = gameCamera;
             _audio = audio;
             _hud = hud;
+            _levelManager = levelManager;
             _hud.Initialize(this);
-            LoadLevel(0);
             SetState(GameState.Title);
+        }
+
+        public void BindLevel(LevelSceneController levelScene, bool startPlaying)
+        {
+            if (levelScene == null)
+            {
+                Debug.LogError("Cannot bind a null level scene.");
+                SetState(GameState.Title);
+                return;
+            }
+
+            _levelScene = levelScene;
+            _roomRoot = levelScene.transform;
+            _player = levelScene.Player;
+            _gate = levelScene.Gate;
+            _exit = levelScene.Exit;
+            _crates.Clear();
+            _crates.AddRange(levelScene.Crates);
+            _plates.Clear();
+            _plates.AddRange(levelScene.Plates);
+
+            levelScene.Prepare(this);
+            _viewAngle = 0;
+            _latchedPlates = 0;
+            _sparks = 3;
+            _rotating = false;
+            _fallGuard = 0f;
+            _roomRoot.localRotation = Quaternion.identity;
+            _camera.orthographicSize = 6.45f;
+            _camera.transform.position = new Vector3(0f, 0f, -10f);
+            SetBodiesFrozen(true);
+
+            if (startPlaying)
+            {
+                SetState(GameState.Playing);
+                SetBodiesFrozen(false);
+                ApplyBodyModes();
+            }
+            else
+            {
+                SetState(GameState.Title);
+            }
         }
 
         private void Update()
         {
             _fallGuard = Mathf.Max(0f, _fallGuard - Time.unscaledDeltaTime);
             HandleGlobalInput();
-            _hud.Refresh(this);
+            if (_hud != null)
+            {
+                _hud.Refresh(this);
+            }
         }
 
         public void StartGame()
         {
-            if (State != GameState.Title)
+            if (State != GameState.Title || !HasLevel)
             {
                 return;
             }
@@ -95,27 +147,24 @@ namespace TurnTheOrientation
 
         public void RestartLevel()
         {
-            if (State == GameState.Title)
+            if (State == GameState.Title || _levelManager == null)
             {
                 return;
             }
 
             _audio.PlayClick();
-            int index = CurrentLevelIndex;
-            LoadLevel(index);
-            SetState(GameState.Playing);
-            SetBodiesFrozen(false);
-            ApplyBodyModes();
+            _levelManager.LoadLevel(CurrentLevelIndex, true);
         }
 
         public void RestartDemo()
         {
+            if (_levelManager == null)
+            {
+                return;
+            }
+
             _audio.PlayClick();
-            CurrentLevelIndex = 0;
-            LoadLevel(0);
-            SetState(GameState.Playing);
-            SetBodiesFrozen(false);
-            ApplyBodyModes();
+            _levelManager.LoadLevel(0, true);
         }
 
         public void AdvanceLevel()
@@ -125,7 +174,7 @@ namespace TurnTheOrientation
                 return;
             }
 
-            if (CurrentLevelIndex >= LevelCount - 1)
+            if (_levelManager == null || CurrentLevelIndex >= LevelCount - 1)
             {
                 SetState(GameState.AllCleared);
                 _audio.PlayWin();
@@ -133,10 +182,7 @@ namespace TurnTheOrientation
             }
 
             _audio.PlayClick();
-            LoadLevel(CurrentLevelIndex + 1);
-            SetState(GameState.Playing);
-            SetBodiesFrozen(false);
-            ApplyBodyModes();
+            _levelManager.LoadLevel(CurrentLevelIndex + 1, true);
         }
 
         public void CompleteLevel()
@@ -172,7 +218,7 @@ namespace TurnTheOrientation
 
         public void PlayerFell()
         {
-            if (State != GameState.Playing || _rotating || _fallGuard > 0f)
+            if (State != GameState.Playing || _rotating || _fallGuard > 0f || !HasLevel)
             {
                 return;
             }
@@ -186,7 +232,7 @@ namespace TurnTheOrientation
                 return;
             }
 
-            _player.Respawn(_level.Spawn);
+            _player.Respawn(_levelScene.SpawnPoint);
             _player.SetFrozen(false);
             ApplyBodyModes();
         }
@@ -217,7 +263,7 @@ namespace TurnTheOrientation
         private void HandleGlobalInput()
         {
             Keyboard keyboard = Keyboard.current;
-            if (keyboard == null)
+            if (keyboard == null || !HasLevel)
             {
                 return;
             }
@@ -296,7 +342,7 @@ namespace TurnTheOrientation
 
         private void RequestRotation(int direction)
         {
-            if (State != GameState.Playing || _rotating)
+            if (State != GameState.Playing || _rotating || !HasLevel)
             {
                 return;
             }
@@ -344,229 +390,6 @@ namespace TurnTheOrientation
             SetBodiesFrozen(false);
         }
 
-        private void LoadLevel(int index)
-        {
-            CurrentLevelIndex = Mathf.Clamp(index, 0, LevelCount - 1);
-            _level = LevelCatalog.All[CurrentLevelIndex];
-            _viewAngle = 0;
-            _latchedPlates = 0;
-            _sparks = 3;
-            _rotating = false;
-            _crates.Clear();
-            _plates.Clear();
-
-            if (_roomRoot != null)
-            {
-                Destroy(_roomRoot.gameObject);
-            }
-
-            _roomRoot = new GameObject($"Room {CurrentLevelIndex + 1:00}").transform;
-            _roomRoot.SetParent(transform, false);
-            BuildFloor();
-            BuildBoxes();
-            BuildPlayer();
-            BuildCrates();
-            BuildPlates();
-            BuildGate();
-            BuildExit();
-            BuildAmbientDetails();
-            _camera.orthographicSize = 6.45f;
-            _camera.transform.position = new Vector3(0f, 0f, -10f);
-            SetBodiesFrozen(true);
-        }
-
-        private void BuildFloor()
-        {
-            var floorObject = new GameObject("Floor");
-            floorObject.transform.SetParent(_roomRoot, false);
-            SpriteRenderer renderer = floorObject.AddComponent<SpriteRenderer>();
-            renderer.sprite = SpriteFactory.Floor();
-            renderer.material = SpriteFactory.SpriteMaterial;
-            renderer.drawMode = SpriteDrawMode.Tiled;
-            renderer.size = new Vector2(16.1f, 10.2f);
-            renderer.sortingOrder = -20;
-
-            var underlay = new GameObject("Floor Underlay");
-            underlay.transform.SetParent(_roomRoot, false);
-            underlay.transform.position = new Vector3(0f, 0f, 1f);
-            SpriteRenderer underlayRenderer = underlay.AddComponent<SpriteRenderer>();
-            underlayRenderer.sprite = SpriteFactory.UiPanel(GamePalette.Alpha(GamePalette.Ink, 0.35f), 8);
-            underlayRenderer.material = SpriteFactory.SpriteMaterial;
-            underlayRenderer.drawMode = SpriteDrawMode.Sliced;
-            underlayRenderer.size = new Vector2(17.4f, 11.4f);
-            underlayRenderer.sortingOrder = -25;
-        }
-
-        private void BuildBoxes()
-        {
-            for (int i = 0; i < _level.Boxes.Count; i++)
-            {
-                BoxSpec spec = _level.Boxes[i];
-                var boxObject = new GameObject($"Wall {i:00}");
-                boxObject.transform.SetParent(_roomRoot, false);
-                boxObject.transform.localPosition = spec.Position;
-                SpriteRenderer renderer = boxObject.AddComponent<SpriteRenderer>();
-                renderer.sprite = SpriteFactory.Block();
-                renderer.material = SpriteFactory.SpriteMaterial;
-                renderer.drawMode = SpriteDrawMode.Tiled;
-                renderer.size = spec.Size;
-                renderer.sortingOrder = 0;
-                BoxCollider2D collider = boxObject.AddComponent<BoxCollider2D>();
-                collider.size = spec.Size;
-            }
-        }
-
-        private void BuildPlayer()
-        {
-            var playerObject = new GameObject("Player");
-            playerObject.transform.SetParent(_roomRoot, false);
-            playerObject.transform.localPosition = _level.Spawn;
-            _player = playerObject.AddComponent<TurnPlayer>();
-            Rigidbody2D body = playerObject.GetComponent<Rigidbody2D>();
-            body.mass = 1.4f;
-            body.linearDamping = 8f;
-            CapsuleCollider2D collider = playerObject.GetComponent<CapsuleCollider2D>();
-            collider.size = new Vector2(0.57f, 0.88f);
-
-            var visualObject = new GameObject("Visual");
-            visualObject.transform.SetParent(playerObject.transform, false);
-            SpriteRenderer renderer = visualObject.AddComponent<SpriteRenderer>();
-            renderer.sprite = SpriteFactory.Player();
-            renderer.material = SpriteFactory.SpriteMaterial;
-            renderer.sortingOrder = 30;
-            visualObject.transform.localScale = Vector3.one * 0.92f;
-
-            var glowObject = new GameObject("Glow");
-            glowObject.transform.SetParent(playerObject.transform, false);
-            glowObject.transform.localPosition = new Vector3(0f, 0f, 0.1f);
-            SpriteRenderer glowRenderer = glowObject.AddComponent<SpriteRenderer>();
-            glowRenderer.sprite = SpriteFactory.Glow();
-            glowRenderer.material = SpriteFactory.SpriteMaterial;
-            glowRenderer.color = GamePalette.Alpha(GamePalette.Player, 0.14f);
-            glowRenderer.sortingOrder = 25;
-            glowObject.transform.localScale = Vector3.one * 1.4f;
-
-            _player.Setup(this, visualObject.transform, _level.Spawn);
-        }
-
-        private void BuildCrates()
-        {
-            for (int i = 0; i < _level.Crates.Count; i++)
-            {
-                CrateSpec spec = _level.Crates[i];
-                var crateObject = new GameObject($"Core Crate {i + 1:00}");
-                crateObject.transform.SetParent(_roomRoot, false);
-                crateObject.transform.localPosition = spec.Position;
-                PushableCrate crate = crateObject.AddComponent<PushableCrate>();
-                Rigidbody2D body = crateObject.GetComponent<Rigidbody2D>();
-                body.mass = 0.9f;
-                body.linearDamping = 7f;
-                BoxCollider2D collider = crateObject.GetComponent<BoxCollider2D>();
-                collider.size = new Vector2(0.78f, 0.78f);
-
-                var visualObject = new GameObject("Visual");
-                visualObject.transform.SetParent(crateObject.transform, false);
-                SpriteRenderer renderer = visualObject.AddComponent<SpriteRenderer>();
-                renderer.sprite = SpriteFactory.Crate();
-                renderer.material = SpriteFactory.SpriteMaterial;
-                renderer.sortingOrder = 20;
-                visualObject.transform.localScale = Vector3.one * 0.88f;
-
-                crate.Setup(spec.Position);
-                _crates.Add(crate);
-            }
-        }
-
-        private void BuildPlates()
-        {
-            for (int i = 0; i < _level.Plates.Count; i++)
-            {
-                PlateSpec spec = _level.Plates[i];
-                var plateObject = new GameObject($"Socket {i + 1:00}");
-                plateObject.transform.SetParent(_roomRoot, false);
-                plateObject.transform.localPosition = spec.Position;
-                PressurePlate plate = plateObject.AddComponent<PressurePlate>();
-
-                var visualObject = new GameObject("Visual");
-                visualObject.transform.SetParent(plateObject.transform, false);
-                SpriteRenderer renderer = visualObject.AddComponent<SpriteRenderer>();
-                renderer.sprite = SpriteFactory.Plate();
-                renderer.material = SpriteFactory.SpriteMaterial;
-                renderer.sortingOrder = 5;
-                visualObject.transform.localScale = Vector3.one * 1.12f;
-                plate.Setup(this, visualObject.transform);
-                _plates.Add(plate);
-            }
-        }
-
-        private void BuildGate()
-        {
-            var gateObject = new GameObject("Signal Gate");
-            gateObject.transform.SetParent(_roomRoot, false);
-            gateObject.transform.localPosition = _level.Gate.Position;
-            SpriteRenderer renderer = gateObject.AddComponent<SpriteRenderer>();
-            renderer.sprite = SpriteFactory.Gate();
-            renderer.material = SpriteFactory.SpriteMaterial;
-            renderer.drawMode = SpriteDrawMode.Sliced;
-            renderer.size = _level.Gate.Size;
-            renderer.sortingOrder = 12;
-            _gate = gateObject.AddComponent<DoorGate>();
-            _gate.Setup(_level.Gate.Size);
-        }
-
-        private void BuildExit()
-        {
-            var exitObject = new GameObject("Exit Signal");
-            exitObject.transform.SetParent(_roomRoot, false);
-            exitObject.transform.localPosition = _level.Exit;
-            _exit = exitObject.AddComponent<ExitPortal>();
-
-            var glowObject = new GameObject("Exit Glow");
-            glowObject.transform.SetParent(exitObject.transform, false);
-            glowObject.transform.localPosition = new Vector3(0f, 0f, 0.2f);
-            SpriteRenderer glowRenderer = glowObject.AddComponent<SpriteRenderer>();
-            glowRenderer.sprite = SpriteFactory.Glow();
-            glowRenderer.material = SpriteFactory.SpriteMaterial;
-            glowRenderer.color = GamePalette.Alpha(GamePalette.Success, 0.3f);
-            glowRenderer.sortingOrder = 2;
-            glowObject.transform.localScale = Vector3.one * 2.3f;
-
-            var visualObject = new GameObject("Visual");
-            visualObject.transform.SetParent(exitObject.transform, false);
-            SpriteRenderer renderer = visualObject.AddComponent<SpriteRenderer>();
-            renderer.sprite = SpriteFactory.Exit();
-            renderer.material = SpriteFactory.SpriteMaterial;
-            renderer.sortingOrder = 18;
-            visualObject.transform.localScale = Vector3.one * 1.18f;
-            _exit.Setup(this, visualObject.transform);
-        }
-
-        private void BuildAmbientDetails()
-        {
-            Vector2[] dots =
-            {
-                new Vector2(-7.2f, 4.8f),
-                new Vector2(7.1f, 4.9f),
-                new Vector2(-7.5f, -0.4f),
-                new Vector2(7.3f, -4.7f),
-                new Vector2(0.8f, 4.9f),
-                new Vector2(-0.2f, -5f)
-            };
-
-            for (int i = 0; i < dots.Length; i++)
-            {
-                var dotObject = new GameObject($"Signal Dot {i:00}");
-                dotObject.transform.SetParent(_roomRoot, false);
-                dotObject.transform.localPosition = dots[i];
-                SpriteRenderer renderer = dotObject.AddComponent<SpriteRenderer>();
-                renderer.sprite = SpriteFactory.Dot();
-                renderer.material = SpriteFactory.SpriteMaterial;
-                renderer.color = GamePalette.Alpha(i % 2 == 0 ? GamePalette.Player : GamePalette.Accent, 0.45f);
-                renderer.sortingOrder = -2;
-                dotObject.transform.localScale = Vector3.one * 0.08f;
-            }
-        }
-
         private void SetBodiesFrozen(bool frozen)
         {
             if (_player != null)
@@ -612,7 +435,10 @@ namespace TurnTheOrientation
         private void SetState(GameState state)
         {
             State = state;
-            _hud.Refresh(this);
+            if (_hud != null)
+            {
+                _hud.Refresh(this);
+            }
         }
     }
 }
