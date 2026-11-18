@@ -1,6 +1,7 @@
 using System.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.Serialization;
 
 namespace TurnTheOrientation
 {
@@ -13,12 +14,13 @@ namespace TurnTheOrientation
             "Level_02",
             "Level_03"
         };
+        [SerializeField] private Camera gameCamera;
+        [FormerlySerializedAs("audio")]
+        [SerializeField] private GameAudio gameAudio;
+        [SerializeField] private GameHud hud;
+        [SerializeField] private TurnGame game;
 
         private static LevelManager s_instance;
-        private Camera _gameCamera;
-        private GameAudio _audio;
-        private GameHud _hud;
-        private TurnGame _game;
         private Coroutine _loadRoutine;
         private bool _isLoading;
 
@@ -41,8 +43,8 @@ namespace TurnTheOrientation
             s_instance = this;
             DontDestroyOnLoad(gameObject);
             Application.targetFrameRate = 60;
-            EnsurePersistentCamera();
-            EnsureGameSystems();
+            ConfigurePersistentCamera();
+            InitializeGameSystems();
         }
 
         private void Start()
@@ -103,62 +105,41 @@ namespace TurnTheOrientation
                 yield break;
             }
 
-            _game.BindLevel(levelScene, startPlaying);
+            game.BindLevel(levelScene, startPlaying);
             _isLoading = false;
             _loadRoutine = null;
         }
 
-        private void EnsurePersistentCamera()
+        private void ConfigurePersistentCamera()
         {
-            _gameCamera = Camera.main;
-            if (_gameCamera == null)
+            if (gameCamera == null)
             {
-                var cameraObject = new GameObject("Main Camera");
-                cameraObject.tag = "MainCamera";
-                _gameCamera = cameraObject.AddComponent<Camera>();
-                cameraObject.AddComponent<AudioListener>();
-            }
-            else
-            {
-                DontDestroyOnLoad(_gameCamera.gameObject);
+                Debug.LogError("LevelManager requires a Camera reference.", this);
+                return;
             }
 
-            _gameCamera.orthographic = true;
-            _gameCamera.orthographicSize = 6.45f;
-            _gameCamera.transform.position = new Vector3(0f, 0f, -10f);
-            _gameCamera.clearFlags = CameraClearFlags.SolidColor;
-            _gameCamera.backgroundColor = GamePalette.Ink;
-            _gameCamera.nearClipPlane = 0.1f;
-            _gameCamera.farClipPlane = 50f;
+            DontDestroyOnLoad(gameCamera.gameObject);
+            gameCamera.orthographic = true;
+            gameCamera.orthographicSize = 6.45f;
+            gameCamera.transform.position = new Vector3(0f, 0f, -10f);
+            gameCamera.clearFlags = CameraClearFlags.SolidColor;
+            gameCamera.backgroundColor = GamePalette.Ink;
+            gameCamera.nearClipPlane = 0.1f;
+            gameCamera.farClipPlane = 50f;
         }
 
-        private void EnsureGameSystems()
+        private void InitializeGameSystems()
         {
-            _audio = GetComponentInChildren<GameAudio>(true);
-            if (_audio == null)
+            if (gameAudio == null || hud == null || game == null)
             {
-                var audioObject = new GameObject("Game Audio");
-                audioObject.transform.SetParent(transform, false);
-                _audio = audioObject.AddComponent<GameAudio>();
-            }
-            _audio.Initialize();
-
-            _hud = GetComponentInChildren<GameHud>(true);
-            if (_hud == null)
-            {
-                var hudObject = new GameObject("Game HUD");
-                hudObject.transform.SetParent(transform, false);
-                _hud = hudObject.AddComponent<GameHud>();
+                Debug.LogError(
+                    "LevelManager requires Audio, HUD, and TurnGame prefab references.",
+                    this);
+                return;
             }
 
-            _game = GetComponentInChildren<TurnGame>(true);
-            if (_game == null)
-            {
-                var gameObject = new GameObject("TurnGame");
-                gameObject.transform.SetParent(transform, false);
-                _game = gameObject.AddComponent<TurnGame>();
-            }
-            _game.Initialize(_gameCamera, _audio, _hud, this);
+            gameAudio.Initialize();
+            game.Initialize(gameCamera, gameAudio, hud, this);
         }
     }
 }

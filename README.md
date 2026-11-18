@@ -30,6 +30,7 @@ the same 2D physics layout, turning vertical walls into platforms.
 - `Assets/Scenes/Level_02.unity`: Two Signals
 - `Assets/Scenes/Level_03.unity`: Cross Current
 - `Assets/Prefabs/Common`: shared player, wall, floor, crate, socket, gate, exit, and prop prefabs
+- `Assets/Prefabs/Systems`: editable HUD, audio, game-state, and runtime-effect prefabs
 - `Assets/Scripts/LevelManager.cs`: scene order, next-level loading, and current-level reload
 - `Assets/Scripts/LevelSceneController.cs`: per-scene prefab references and starting layout
 - `Assets/Scripts/TurnGame.cs`: room state, rotation, gravity, plates, and progression
@@ -37,8 +38,10 @@ the same 2D physics layout, turning vertical walls into platforms.
 - `Assets/Scripts/GameHud.cs`: title, HUD, pause, room-clear, and final screens
 - `Assets/Tests/EditMode`: rules, Build Settings, and prefab migration tests
 
-Level layouts are authored as prefab instances in their own scenes and can be
-adjusted directly in the Unity editor. Gameplay audio is synthesized at runtime.
+Level layouts and system objects are authored as prefab instances and can be
+adjusted directly in the Unity editor. The only runtime instances created from
+prefabs are short-lived effect particles. Gameplay audio clips are synthesized
+at runtime without creating scene objects.
 
 ## Open In Unity
 

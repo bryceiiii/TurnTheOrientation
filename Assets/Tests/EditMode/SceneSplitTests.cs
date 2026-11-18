@@ -26,6 +26,15 @@ namespace TurnTheOrientation.Tests
             "Assets/Prefabs/Common/SignalDot.prefab"
         };
 
+        private static readonly string[] SystemPrefabPaths =
+        {
+            "Assets/Prefabs/Systems/GameHud.prefab",
+            "Assets/Prefabs/Systems/GameAudio.prefab",
+            "Assets/Prefabs/Systems/TurnGame.prefab",
+            "Assets/Prefabs/Systems/FxEffects.prefab",
+            "Assets/Prefabs/Systems/FxSpark.prefab"
+        };
+
         [Test]
         public void BootstrapAndEveryLevelSceneAreEnabledInBuildSettings()
         {
@@ -50,6 +59,17 @@ namespace TurnTheOrientation.Tests
                 Assert.IsNotNull(
                     AssetDatabase.LoadAssetAtPath<GameObject>(PrefabPaths[i]),
                     $"Missing common prefab {PrefabPaths[i]}");
+            }
+        }
+
+        [Test]
+        public void RuntimeSystemsAreStoredAsPrefabs()
+        {
+            for (int i = 0; i < SystemPrefabPaths.Length; i++)
+            {
+                Assert.IsNotNull(
+                    AssetDatabase.LoadAssetAtPath<GameObject>(SystemPrefabPaths[i]),
+                    $"Missing system prefab {SystemPrefabPaths[i]}");
             }
         }
     }

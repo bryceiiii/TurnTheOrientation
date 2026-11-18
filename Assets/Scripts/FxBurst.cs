@@ -5,6 +5,8 @@ namespace TurnTheOrientation
 {
     public sealed class FxBurst : MonoBehaviour
     {
+        [SerializeField] private GameObject sparkPrefab;
+
         private sealed class Spark
         {
             public Transform Transform;
@@ -16,37 +18,45 @@ namespace TurnTheOrientation
         }
 
         private readonly List<Spark> _sparks = new List<Spark>();
+        private static FxBurst s_instance;
+
+        private void Awake()
+        {
+            s_instance = this;
+        }
+
+        private void OnDestroy()
+        {
+            if (s_instance == this)
+            {
+                s_instance = null;
+            }
+        }
 
         public static void Play(Vector2 position, Color color, int count, float spread, Transform parent)
         {
-            if (parent == null)
+            if (s_instance == null || s_instance.sparkPrefab == null || parent == null)
             {
                 return;
             }
 
-            GameObject host = new GameObject("Burst");
-            host.transform.SetParent(parent, false);
-            host.transform.position = position;
-            FxBurst burst = host.AddComponent<FxBurst>();
-            burst.Spawn(color, count, spread);
+            s_instance.Spawn(position, color, count, spread, parent);
         }
 
-        private void Spawn(Color color, int count, float spread)
+        private void Spawn(Vector2 position, Color color, int count, float spread, Transform parent)
         {
             for (int i = 0; i < count; i++)
             {
-                GameObject sparkObject = new GameObject($"Spark {i:00}");
-                sparkObject.transform.SetParent(transform, false);
+                GameObject sparkObject = Instantiate(sparkPrefab, parent);
+                sparkObject.name = $"Spark {i:00}";
+                sparkObject.transform.position = position;
                 float angle = Random.Range(0f, Mathf.PI * 2f);
                 float speed = Random.Range(spread * 0.45f, spread);
                 Vector2 velocity = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * speed;
                 float size = Random.Range(0.12f, 0.24f);
                 sparkObject.transform.localScale = Vector3.one * size;
-                SpriteRenderer renderer = sparkObject.AddComponent<SpriteRenderer>();
-                renderer.sprite = SpriteFactory.Dot();
-                renderer.material = SpriteFactory.SpriteMaterial;
+                SpriteRenderer renderer = sparkObject.GetComponent<SpriteRenderer>();
                 renderer.color = color;
-                renderer.sortingOrder = 50;
                 _sparks.Add(new Spark
                 {
                     Transform = sparkObject.transform,
@@ -80,10 +90,6 @@ namespace TurnTheOrientation
                 spark.Renderer.color = color;
             }
 
-            if (_sparks.Count == 0)
-            {
-                Destroy(gameObject);
-            }
         }
     }
 }

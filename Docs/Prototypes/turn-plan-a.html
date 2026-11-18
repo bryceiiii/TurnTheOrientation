@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TURN · 方案1 门禁原型</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:#F3F2EE;
+    color:#24282A;
+    font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    display:flex;justify-content:center;
+    padding:24px 16px 48px;
+  }
+  .wrap{width:100%;max-width:680px}
+  h1{font-size:17px;font-weight:600;margin:0 0 4px;letter-spacing:.2px}
+  .sub{font-size:12.5px;color:#767C7F;margin:0 0 14px;line-height:1.6}
+  .stage{position:relative;border-radius:12px;overflow:hidden;border:1px solid #DEDDD6;background:#fff}
+  canvas{display:block;width:100%;height:auto}
+  .overlay{
+    position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:10px;
+    background:rgba(250,249,245,.93);backdrop-filter:blur(2px);
+    text-align:center;padding:24px;
+  }
+  .overlay.hide{display:none}
+  .ov-title{font-size:19px;font-weight:600}
+  .ov-sub{font-size:13px;color:#6B7174;line-height:1.7}
+  .ov-key{font-size:12px;color:#9AA0A3;margin-top:4px}
+  .bar{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 8px}
+  .pill{
+    font-size:12px;padding:4px 10px;border-radius:999px;
+    background:#EAE9E4;color:#4A5053;border:1px solid #DCDBD4;
+    font-variant-numeric:tabular-nums;
+  }
+  .pill.m-drift{background:#E4EFFB;color:#1D5FA5;border-color:#BED7F0}
+  .pill.m-side{background:#FBE8DF;color:#9C4320;border-color:#F0C9B4}
+  .hint{font-size:12.5px;color:#6B7174;line-height:1.7;margin:0 0 12px}
+  .legend{
+    display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 12px;
+  }
+  .lg{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:#4A5053;line-height:1.55;
+      background:#FAF9F5;border:1px solid #E6E4DC;border-radius:8px;padding:8px 10px}
+  .sw{width:16px;height:16px;border-radius:4px;flex:none;margin-top:1px}
+  .sw.v{background:#D7F0E6;border:1.5px dashed #1D9E75;box-shadow:inset 0 0 0 3px #EAF8F3}
+  .sw.c{background:#F8EAD2;border:1.5px dashed #B4802A;box-shadow:inset 0 0 0 3px #FBF3E4}
+  .keys{font-size:12px;color:#767C7F;line-height:1.9}
+  kbd{
+    display:inline-block;min-width:18px;text-align:center;
+    background:#fff;border:1px solid #D3D2CA;border-bottom-width:2px;
+    border-radius:4px;padding:0 5px;font-size:11px;font-family:inherit;color:#3A4043;
+  }
+  details{margin-top:14px;font-size:12.5px;color:#5D6366;line-height:1.75}
+  summary{cursor:pointer;color:#3A4043;font-weight:500;font-size:12.5px;margin-bottom:6px}
+  details ul{margin:6px 0 0;padding-left:18px}
+  details li{margin-bottom:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>TURN · 方案1「模式门禁」可玩原型</h1>
+  <p class="sub">只改了规则，没改引擎：漂移态无重力自由飞，承重态受重力 + 只能水平移动与跳跃。<br>两种门让两个视角的可达范围互不包含。</p>
+
+  <div class="stage">
+    <canvas id="game"></canvas>
+    <div class="overlay hide" id="overlay">
+      <div class="ov-title" id="ovTitle"></div>
+      <div class="ov-sub" id="ovSub"></div>
+      <div class="ov-key" id="ovKey"></div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <div class="pill" id="pLevel">01</div>
+    <div class="pill" id="pMode">漂移态</div>
+    <div class="pill" id="pPlate">机关 0/1</div>
+    <div class="pill" id="pTurns">TURN 0</div>
+  </div>
+
+  <p class="hint" id="hint"></p>
+
+  <div class="legend">
+    <div class="lg"><div class="sw v"></div><div><b>通风口</b><br>只有漂移态能穿过，落地就变成实心</div></div>
+    <div class="lg"><div class="sw c"></div><div><b>裂缝</b><br>只有承重态能挤过去，漂移态是实心</div></div>
+  </div>
+
+  <p class="keys">
+    <kbd>A</kbd><kbd>D</kbd> 移动　<kbd>W</kbd><kbd>S</kbd> 漂移态上下 / 承重态上=跳　<kbd>空格</kbd> 跳　
+    <kbd>B</kbd>/<kbd>N</kbd> 顺/逆时针转 90°　<kbd>R</kbd> 重开本关　<kbd>Enter</kbd> 下一关
+  </p>
+
+  <details>
+    <summary>这个原型在验证什么</summary>
+    <ul>
+      <li><b>出口永远在裂缝后面</b>：漂移态物理上过不去，所以「飞到出口再按 B」这条捷径被堵死了。</li>
+      <li><b>每个区域只属于一种状态</b>：左边的箱子只能在漂移态里推，右边的出口只能在承重态里走。</li>
+      <li><b>一关至少 2 次 TURN</b>：进左边要转成漂移，出右边要转成承重。次数是被关卡逼出来的，不是 UI 提示的。</li>
+      <li>旋转仍然免费无限（方案2 的 TURN 预算没接进来），所以 HUD 里的 TURN 计数是给你看「一关实际用了几次」的观测数据。</li>
+    </ul>
+  </details>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+var CELL=34, COLS=20, ROWS=14, W=COLS*CELL, H=ROWS*CELL;
+var HW=10, HH=11;
+var DRIFT_SPEED=250, SIDE_SPEED=212, G=1600, JUMP=560, MAXFALL=980;
+
+var LEVELS=[
+  {
+    name:"01",
+    hint:"左边舱室里有一个箱子和一块压力板，右边舱室里是出口。通风口在漂移态才能穿，裂缝在承重态才能穿。",
+    rows:[
+      "####################",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#....S.....#...#",
+      "#PX.V..........C..E#",
+      "####################",
+      "####################"
+    ]
+  },
+  {
+    name:"02",
+    hint:"箱子还在左边。出口挪到了高台上——承重态只能一路跳上去，而漂移态被裂缝堵死在下面。",
+    rows:[
+      "####################",
+      "#................#.#",
+      "#................#.#",
+      "#................#.#",
+      "#................#.#",
+      "#####............#.#",
+      "#...#............#.#",
+      "#...#............#.#",
+      "#...#............CE#",
+      "#...#..........#####",
+      "#...#.......########",
+      "#PX.V..S.###########",
+      "####################",
+      "####################"
+    ]
+  },
+  {
+    name:"03",
+    hint:"两块压力板、两个箱子。出口在顶棚上：连按三次 B 转到「承重↑」，贴着天花板走过去。途中那块凸起要跳一下才过得去。",
+    rows:[
+      "####################",
+      "#..........#....CE.#",
+      "#...............#..#",
+      "#...............#..#",
+      "#...............#..#",
+      "#...............####",
+      "#..................#",
+      "#####..........#####",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#...#..........#...#",
+      "#P.XV...S......V.XP#",
+      "####################",
+      "####################"
+    ]
+  }
+];
+
+var cvs=document.getElementById("game");
+var ctx=cvs.getContext("2d");
+var DPR=Math.min(window.devicePixelRatio||1,2);
+cvs.width=W*DPR; cvs.height=H*DPR;
+ctx.setTransform(DPR,0,0,DPR,0,0);
+
+var grid=[], crates=[], plates=[], exitCell=null, spawn={c:2,r:11};
+var levelIdx=0, angle=0, mode="drift", gdir=1;
+var player={x:0,y:0,vx:0,vy:0,grounded:false};
+var turns=0, totalTurns=0, freeze=0, done=false, allDone=false, jumpQueued=false, t0=0;
+var keys={};
+
+var elLevel=document.getElementById("pLevel");
+var elMode=document.getElementById("pMode");
+var elPlate=document.getElementById("pPlate");
+var elTurns=document.getElementById("pTurns");
+var elHint=document.getElementById("hint");
+var overlay=document.getElementById("overlay");
+var ovTitle=document.getElementById("ovTitle");
+var ovSub=document.getElementById("ovSub");
+var ovKey=document.getElementById("ovKey");
+
+function normAngle(a){ a=a%360; return a<0?a+360:a; }
+function modeFor(a){ return normAngle(a)%180===0 ? "drift" : "side"; }
+function gdirFor(a){ var n=normAngle(a); return n===90?1:(n===270?-1:0); }
+function modeLabel(){
+  var n=normAngle(angle);
+  if(n===0) return "漂移态";
+  if(n===90) return "承重态 ↓";
+  if(n===180) return "漂移态";
+  return "承重态 ↑";
+}
+
+function loadLevel(i){
+  levelIdx=i;
+  var L=LEVELS[i];
+  grid=[]; crates=[]; plates=[]; exitCell=null;
+  for(var r=0;r<ROWS;r++){
+    var line=L.rows[r], row=[];
+    for(var c=0;c<COLS;c++){
+      var ch=line.charAt(c);
+      if(ch==="X"){ crates.push({c:c,r:r,ox:0,oy:0}); ch="."; }
+      else if(ch==="P"){ plates.push({c:c,r:r,latched:false}); ch="."; }
+      else if(ch==="E"){ exitCell={c:c,r:r}; ch="."; }
+      else if(ch==="S"){ spawn={c:c,r:r}; ch="."; }
+      row.push(ch);
+    }
+    grid.push(row);
+  }
+  player.x=(spawn.c+0.5)*CELL;
+  player.y=(spawn.r+0.5)*CELL;
+  player.vx=0; player.vy=0; player.grounded=false;
+  angle=0; applyModeStatic();
+  freeze=0; done=false; jumpQueued=false; turns=0;
+  elHint.textContent=L.hint;
+  hud();
+}
+
+function applyModeStatic(){
+  mode=modeFor(angle);
+  gdir=gdirFor(angle)||1;
+  unstick();
+}
+
+function tileSolid(c,r){
+  if(c<0||c>=COLS||r<0||r>=ROWS) return true;
+  var ch=grid[r][c];
+  if(ch==="#") return true;
+  if(ch==="V") return mode==="side";
+  if(ch==="C") return mode==="drift";
+  return false;
+}
+function crateAt(c,r){
+  for(var i=0;i<crates.length;i++) if(crates[i].c===c && crates[i].r===r) return i;
+  return -1;
+}
+function boxHitsTile(x,y,hw,hh){
+  var c0=Math.floor((x-hw)/CELL), c1=Math.floor((x+hw-0.01)/CELL);
+  var r0=Math.floor((y-hh)/CELL), r1=Math.floor((y+hh-0.01)/CELL);
+  for(var r=r0;r<=r1;r++) for(var c=c0;c<=c1;c++) if(tileSolid(c,r)) return true;
+  return false;
+}
+function boxHitsCrate(x,y,hw,hh){
+  for(var i=0;i<crates.length;i++){
+    var cx=(crates[i].c+0.5)*CELL, cy=(crates[i].r+0.5)*CELL, half=CELL/2;
+    if(Math.abs(x-cx)<hw+half-0.01 && Math.abs(y-cy)<hh+half-0.01) return i;
+  }
+  return -1;
+}
+
+function unstick(){
+  if(!boxHitsTile(player.x,player.y,HW,HH)) return;
+  var dirs=[[0,-1],[0,1],[-1,0],[1,0],[-1,-1],[1,-1],[-1,1],[1,1]];
+  for(var ring=1; ring<=4; ring++){
+    for(var k=0;k<dirs.length;k++){
+      var nx=player.x+dirs[k][0]*ring*CELL*0.5;
+      var ny=player.y+dirs[k][1]*ring*CELL*0.5;
+      if(!boxHitsTile(nx,ny,HW,HH) && boxHitsCrate(nx,ny,HW,HH)<0){
+        player.x=nx; player.y=ny; player.vx=0; player.vy=0; return;
+      }
+    }
+  }
+  player.x=(spawn.c+0.5)*CELL;
+  player.y=(spawn.r+0.5)*CELL;
+  player.vx=0; player.vy=0;
+}
+
+function moveX(dx){
+  if(!dx) return;
+  var dir=dx>0?1:-1, remain=Math.abs(dx);
+  while(remain>0.0001){
+    var st=Math.min(6,remain); remain-=st;
+    player.x+=dir*st;
+    var c=dir>0?Math.floor((player.x+HW)/CELL):Math.floor((player.x-HW)/CELL);
+    var rT=Math.floor((player.y-HH+2)/CELL), rB=Math.floor((player.y+HH-2)/CELL);
+    if(tileSolid(c,rT)||tileSolid(c,rB)){
+      player.x = dir>0 ? c*CELL-HW-0.01 : (c+1)*CELL+HW+0.01;
+      player.vx=0; return;
+    }
+    var hit=-1;
+    for(var r=rT;r<=rB;r++){ var ci=crateAt(c,r); if(ci>=0){hit=ci;break;} }
+    if(hit>=0){
+      if(mode==="drift"){
+        var nc=c+dir;
+        if(!tileSolid(nc,crates[hit].r) && crateAt(nc,crates[hit].r)<0){
+          crates[hit].c=nc; crates[hit].ox=-dir*CELL;
+          checkPlates(); continue;
+        }
+      }
+      player.x = dir>0 ? c*CELL-HW-0.01 : (c+1)*CELL+HW+0.01;
+      player.vx=0; return;
+    }
+  }
+}
+
+function moveY(dy){
+  if(!dy) return;
+  var dir=dy>0?1:-1, remain=Math.abs(dy);
+  while(remain>0.0001){
+    var st=Math.min(6,remain); remain-=st;
+    player.y+=dir*st;
+    var r=dir>0?Math.floor((player.y+HH)/CELL):Math.floor((player.y-HH)/CELL);
+    var cL=Math.floor((player.x-HW+2)/CELL), cR=Math.floor((player.x+HW-2)/CELL);
+    var solidCol=false, hitCrate=false;
+    for(var c=cL;c<=cR;c++){
+      if(tileSolid(c,r)) solidCol=true;
+      if(crateAt(c,r)>=0) hitCrate=true;
+    }
+    if(solidCol||hitCrate){
+      player.y = dir>0 ? r*CELL-HH-0.01 : (r+1)*CELL+HH+0.01;
+      player.vy=0; return;
+    }
+  }
+}
+
+function groundedCheck(){
+  if(mode!=="side") return false;
+  var probe=player.y+gdir*(HH+1.6);
+  var r=Math.floor(probe/CELL);
+  var cL=Math.floor((player.x-HW+2)/CELL), cR=Math.floor((player.x+HW-2)/CELL);
+  for(var c=cL;c<=cR;c++) if(tileSolid(c,r)||crateAt(c,r)>=0) return true;
+  return false;
+}
+
+function settleCrates(){
+  var guard=0;
+  var moved=true;
+  while(moved && guard<200){
+    moved=false; guard++;
+    for(var i=0;i<crates.length;i++){
+      var cr=crates[i], nr=cr.r+gdir;
+      if(!tileSolid(cr.c,nr) && crateAt(cr.c,nr)<0){
+        cr.r=nr; cr.oy=-gdir*CELL*0.55; moved=true;
+      }
+    }
+  }
+  checkPlates();
+}
+
+function checkPlates(){
+  for(var i=0;i<plates.length;i++){
+    if(plates[i].latched) continue;
+    for(var j=0;j<crates.length;j++){
+      if(crates[j].c===plates[i].c && crates[j].r===plates[i].r){ plates[i].latched=true; break; }
+    }
+  }
+}
+function allLatched(){ for(var i=0;i<plates.length;i++) if(!plates[i].latched) return false; return true; }
+function exitArmed(){ return mode==="side" && allLatched() && !done; }
+
+function checkExit(){
+  if(done||!exitCell) return;
+  var armed=exitArmed();
+  var ex=(exitCell.c+0.5)*CELL, ey=(exitCell.r+0.5)*CELL;
+  if(Math.abs(player.x-ex)<HW+CELL/2 && Math.abs(player.y-ey)<HH+CELL/2){
+    if(armed) completeLevel();
+  }
+}
+
+function completeLevel(){
+  done=true;
+  totalTurns+=turns;
+  overlay.classList.remove("hide");
+  if(levelIdx>=LEVELS.length-1){
+    allDone=true;
+    ovTitle.textContent="全部通过";
+    ovSub.innerHTML="三关合计 TURN "+totalTurns+" 次。<br>现在回答三个问题，比分数有用。";
+    ovKey.textContent="按 Enter 从第一关重来";
+  }else{
+    ovTitle.textContent="第 "+LEVELS[levelIdx].name+" 关 通过";
+    ovSub.innerHTML="本关 TURN <b>"+turns+"</b> 次　·　累计 "+totalTurns+" 次";
+    ovKey.textContent="按 Enter 下一关";
+  }
+}
+
+function rotate(dir){
+  if(done) return;
+  angle=normAngle(angle+dir*90);
+  mode=modeFor(angle); gdir=gdirFor(angle)||1;
+  freeze=0.14;
+  turns++;
+  unstick();
+  if(mode==="side") settleCrates();
+  else checkPlates();
+  hud();
+}
+
+function advance(){
+  if(!done) return;
+  overlay.classList.add("hide");
+  if(allDone){ allDone=false; totalTurns=0; loadLevel(0); }
+  else loadLevel(Math.min(levelIdx+1,LEVELS.length-1));
+}
+
+function reload(){
+  overlay.classList.add("hide");
+  totalTurns-=turns;
+  if(totalTurns<0) totalTurns=0;
+  loadLevel(levelIdx);
+}
+
+function hud(){
+  elLevel.textContent="第 "+LEVELS[levelIdx].name+" 关";
+  elMode.textContent=modeLabel();
+  elMode.className="pill "+(mode==="drift"?"m-drift":"m-side");
+  var n=0; for(var i=0;i<plates.length;i++) if(plates[i].latched) n++;
+  elPlate.textContent="机关 "+n+"/"+plates.length;
+  elTurns.textContent="TURN "+turns;
+}
+
+function inputX(){ return (keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0); }
+function inputY(){ return (keys.KeyW||keys.ArrowUp?1:0)-(keys.KeyS||keys.ArrowDown?1:0); }
+
+function gateAssist(dt,ix){
+  if(mode!=="drift"||ix===0) return;
+  var dir=ix>0?1:-1;
+  var c=Math.floor((player.x+dir*(HW+5))/CELL);
+  var r=Math.floor(player.y/CELL);
+  var ch=(c>=0&&c<COLS&&r>=0&&r<ROWS)?grid[r][c]:"#";
+  if(ch!=="V") return;
+  var cy=(r+0.5)*CELL;
+  if(Math.abs(player.y-cy)<=16){
+    var step=Math.min(Math.abs(cy-player.y),170*dt);
+    player.y+=(cy>player.y?1:-1)*step;
+  }
+}
+
+function physics(dt){
+  if(done) return;
+  if(freeze>0){ freeze-=dt; return; }
+  var ix=inputX(), iy=inputY();
+  if(mode==="drift"){
+    player.vx=ix*DRIFT_SPEED;
+    player.vy=-iy*DRIFT_SPEED;
+    player.grounded=false;
+    gateAssist(dt,ix);
+  }else{
+    var target=ix*SIDE_SPEED;
+    player.vx+=(target-player.vx)*Math.min(1,dt*16);
+    player.vy+=G*gdir*dt;
+    if(player.vy*gdir>MAXFALL) player.vy=MAXFALL*gdir;
+    if(jumpQueued && player.grounded){
+      player.vy=-JUMP*gdir;
+      player.grounded=false;
+    }
+  }
+  jumpQueued=false;
+  moveX(player.vx*dt);
+  moveY(player.vy*dt);
+  player.grounded=groundedCheck();
+  if(mode==="side") settleCrates();
+  checkExit();
+}
+
+function rr(x,y,w,h,r){
+  ctx.beginPath();
+  var rad=Math.min(r,w/2,h/2);
+  ctx.moveTo(x+rad,y);
+  ctx.lineTo(x+w-rad,y); ctx.quadraticCurveTo(x+w,y,x+w,y+rad);
+  ctx.lineTo(x+w,y+h-rad); ctx.quadraticCurveTo(x+w,y+h,x+w-rad,y+h);
+  ctx.lineTo(x+rad,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-rad);
+  ctx.lineTo(x,y+rad); ctx.quadraticCurveTo(x,y,x+rad,y);
+  ctx.closePath();
+}
+
+function drawGate(c,r,kind,blocked){
+  var x=c*CELL, y=r*CELL;
+  var accent = kind==="V" ? "#1D9E75" : "#B4802A";
+  var light  = kind==="V" ? "#E4F6EF" : "#FAEEDA";
+  var mid    = kind==="V" ? "#9FE1CB" : "#EFC98A";
+  if(blocked){
+    ctx.fillStyle=light; ctx.fillRect(x,y,CELL,CELL);
+    ctx.fillStyle=accent; ctx.globalAlpha=.75;
+    if(kind==="V"){
+      for(var i=0;i<3;i++) ctx.fillRect(x+7+i*8,y+3,5,CELL-6);
+    }else{
+      ctx.beginPath();
+      ctx.moveTo(x+5,y+2); ctx.lineTo(x+13,y+11); ctx.lineTo(x+8,y+17);
+      ctx.lineTo(x+18,y+25); ctx.lineTo(x+11,y+32); ctx.lineTo(x+4,y+22);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    ctx.strokeStyle=accent; ctx.lineWidth=1.4;
+    ctx.strokeRect(x+.7,y+.7,CELL-1.4,CELL-1.4);
+  }else{
+    ctx.fillStyle=light; ctx.globalAlpha=.45; ctx.fillRect(x,y,CELL,CELL); ctx.globalAlpha=1;
+    ctx.strokeStyle=accent; ctx.lineWidth=1.2;
+    ctx.setLineDash([4,3]);
+    ctx.strokeRect(x+1.2,y+1.2,CELL-2.4,CELL-2.4);
+    ctx.setLineDash([]);
+    ctx.fillStyle=mid; ctx.globalAlpha=.85;
+    if(kind==="V"){
+      for(var j=0;j<3;j++) ctx.fillRect(x+8+j*7,y+9,3,CELL-18);
+    }else{
+      ctx.beginPath();
+      ctx.moveTo(x+6,y+6); ctx.lineTo(x+14,y+15); ctx.lineTo(x+9,y+20);
+      ctx.lineTo(x+17,y+28); ctx.lineTo(x+11,y+30);
+      ctx.lineWidth=2; ctx.strokeStyle=mid; ctx.stroke();
+    }
+    ctx.globalAlpha=1;
+  }
+}
+
+function drawWall(c,r){
+  var x=c*CELL, y=r*CELL;
+  ctx.fillStyle="#2F3437";
+  rr(x+1,y+1,CELL-2,CELL-2,3); ctx.fill();
+}
+
+function draw(){
+  var bg = mode==="drift" ? "#F5F9FD" : "#FDF8F3";
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+
+  ctx.strokeStyle="rgba(60,70,80,.045)"; ctx.lineWidth=1;
+  for(var gx=0;gx<=COLS;gx++){ ctx.beginPath(); ctx.moveTo(gx*CELL+.5,0); ctx.lineTo(gx*CELL+.5,H); ctx.stroke(); }
+  for(var gy=0;gy<=ROWS;gy++){ ctx.beginPath(); ctx.moveTo(0,gy*CELL+.5); ctx.lineTo(W,gy*CELL+.5); ctx.stroke(); }
+
+  for(var r=0;r<ROWS;r++) for(var c=0;c<COLS;c++){
+    var ch=grid[r][c];
+    if(ch==="#") drawWall(c,r);
+    else if(ch==="V") drawGate(c,r,"V",mode==="side");
+    else if(ch==="C") drawGate(c,r,"C",mode==="drift");
+  }
+
+  for(var i=0;i<plates.length;i++){
+    var p=plates[i], px=(p.c+.5)*CELL, py=(p.r+.5)*CELL;
+    ctx.beginPath(); ctx.arc(px,py,10,0,Math.PI*2);
+    if(p.latched){ ctx.fillStyle="#2FA36B"; ctx.fill(); ctx.strokeStyle="#1B6E47"; }
+    else { ctx.fillStyle="rgba(120,128,132,.12)"; ctx.fill(); ctx.strokeStyle="#8A9093"; }
+    ctx.lineWidth=1.6; ctx.stroke();
+    ctx.beginPath(); ctx.arc(px,py,4.5,0,Math.PI*2);
+    ctx.fillStyle=p.latched?"rgba(255,255,255,.85)":"rgba(120,128,132,.35)"; ctx.fill();
+  }
+
+  if(exitCell){
+    var ex=exitCell.c*CELL, ey=exitCell.r*CELL, armed=exitArmed();
+    ctx.fillStyle=armed?"#2FA36B":"#D6D8D4";
+    rr(ex+3,ey+3,CELL-6,CELL-6,5); ctx.fill();
+    ctx.strokeStyle=armed?"#1B6E47":"#AFB4B1"; ctx.lineWidth=1.6; ctx.stroke();
+    if(armed){
+      ctx.strokeStyle="#fff"; ctx.lineWidth=2.4; ctx.lineCap="round";
+      ctx.beginPath(); ctx.moveTo(ex+11,ey+17); ctx.lineTo(ex+16,ey+23); ctx.lineTo(ex+24,ey+12); ctx.stroke();
+    }else{
+      ctx.fillStyle="#8A9093";
+      rr(ex+13,ey+15,9,8,2); ctx.fill();
+      ctx.beginPath(); ctx.arc(ex+17.5,ey+15,3.4,Math.PI,0); ctx.lineWidth=1.8; ctx.strokeStyle="#8A9093"; ctx.stroke();
+    }
+  }
+
+  for(var k=0;k<crates.length;k++){
+    var cr=crates[k];
+    var bx=(cr.c+.5)*CELL+cr.ox, by=(cr.r+.5)*CELL+cr.oy;
+    ctx.fillStyle="#B98B5E"; rr(bx-CELL/2+2,by-CELL/2+2,CELL-4,CELL-4,4); ctx.fill();
+    ctx.strokeStyle="#6F4A2A"; ctx.lineWidth=1.6; ctx.stroke();
+    ctx.strokeStyle="rgba(111,74,42,.5)"; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(bx-CELL/2+7,by-CELL/2+7); ctx.lineTo(bx+CELL/2-7,by+CELL/2-7);
+    ctx.moveTo(bx+CELL/2-7,by-CELL/2+7); ctx.lineTo(bx-CELL/2+7,by+CELL/2-7);
+    ctx.stroke();
+  }
+
+  if(!done){
+    var accent = mode==="drift" ? "#378ADD" : "#D85A30";
+    ctx.fillStyle="rgba(0,0,0,.10)";
+    ctx.beginPath(); ctx.ellipse(player.x,player.y+HH-2,HW*.85,4,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=accent;
+    rr(player.x-HW,player.y-HH,HW*2,HH*2,6); ctx.fill();
+    ctx.strokeStyle="rgba(0,0,0,.22)"; ctx.lineWidth=1.2; ctx.stroke();
+    ctx.fillStyle="rgba(255,255,255,.92)";
+    ctx.beginPath(); ctx.arc(player.x-4,player.y-3,2.4,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(player.x+4,player.y-3,2.4,0,Math.PI*2); ctx.fill();
+    if(mode==="side"){
+      ctx.strokeStyle=accent; ctx.lineWidth=2; ctx.lineCap="round";
+      var ay=player.y+gdir*(HH+9);
+      ctx.beginPath(); ctx.moveTo(player.x,player.y+gdir*(HH+2)); ctx.lineTo(player.x,ay); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(player.x-4,ay-gdir*4); ctx.lineTo(player.x,ay); ctx.lineTo(player.x+4,ay-gdir*4);
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle="rgba(40,48,52,.55)";
+  ctx.font="600 12px 'Segoe UI',system-ui,sans-serif";
+  ctx.textAlign="left";
+  ctx.fillText("TURN "+normAngle(angle)+"°",12,20);
+  ctx.textAlign="right";
+  ctx.fillText(mode==="drift"?"DRIFT":"WEIGHT",W-12,20);
+  ctx.textAlign="left";
+}
+
+var last=0;
+function loop(ts){
+  if(!last) last=ts;
+  var dt=Math.min(0.033,(ts-last)/1000);
+  last=ts;
+  if(!done) physics(dt);
+  for(var i=0;i<crates.length;i++){
+    crates[i].ox*=Math.pow(0.001,dt);
+    crates[i].oy*=Math.pow(0.001,dt);
+    if(Math.abs(crates[i].ox)<0.4) crates[i].ox=0;
+    if(Math.abs(crates[i].oy)<0.4) crates[i].oy=0;
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener("keydown",function(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].indexOf(e.code)>=0) e.preventDefault();
+  if(e.repeat) return;
+  keys[e.code]=true;
+  if(e.code==="KeyR"){ reload(); return; }
+  if(e.code==="KeyB"){ rotate(1); return; }
+  if(e.code==="KeyN"){ rotate(-1); return; }
+  if(e.code==="Enter"){ advance(); return; }
+  if(e.code==="Space"||e.code==="KeyW"||e.code==="ArrowUp") jumpQueued=true;
+});
+window.addEventListener("keyup",function(e){ keys[e.code]=false; });
+window.addEventListener("blur",function(){ keys={}; });
+
+loadLevel(0);
+hud();
+requestAnimationFrame(loop);
+
+window.__TURN__={snap:function(){
+  return {level:levelIdx,mode:mode,angle:angle,gdir:gdir,x:player.x,y:player.y,
+          done:done,turns:turns,
+          crates:crates.map(function(c){return {c:c.c,r:c.r};}),
+          plates:plates.map(function(p){return p.latched;}),
+          exit:exitCell};
+},goto:function(i){overlay.classList.add("hide");allDone=false;totalTurns=0;loadLevel(i);}};
+})();
+</script>
+</body>
+</html>

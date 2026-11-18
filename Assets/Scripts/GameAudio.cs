@@ -4,6 +4,7 @@ namespace TurnTheOrientation
 {
     public sealed class GameAudio : MonoBehaviour
     {
+        [SerializeField] private AudioSource source;
         private AudioSource _source;
         private AudioClip _jump;
         private AudioClip _plate;
@@ -14,7 +15,12 @@ namespace TurnTheOrientation
 
         public void Initialize()
         {
-            _source = gameObject.AddComponent<AudioSource>();
+            _source = source;
+            if (_source == null)
+            {
+                Debug.LogError("GameAudio requires an AudioSource reference.", this);
+                return;
+            }
             _source.playOnAwake = false;
             _source.spatialBlend = 0f;
             _source.volume = 0.48f;
